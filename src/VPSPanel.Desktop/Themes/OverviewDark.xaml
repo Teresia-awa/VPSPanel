@@ -1,0 +1,10 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <LinearGradientBrush x:Key="OverviewBackdrop" StartPoint="0,0" EndPoint="1,.45"><GradientStop Color="#1D2428"/><GradientStop Offset=".53" Color="#1B2237"/><GradientStop Offset="1" Color="#242526"/></LinearGradientBrush>
+ <SolidColorBrush x:Key="OverviewCard" Color="#12FFFFFF"/>
+ <SolidColorBrush x:Key="OverviewEdge" Color="#373D46"/>
+ <SolidColorBrush x:Key="OverviewGridLine" Color="#404752"/>
+ <SolidColorBrush x:Key="OverviewNavSelected" Color="#303842"/>
+ <SolidColorBrush x:Key="OverviewDown" Color="#65BBEB"/>
+ <SolidColorBrush x:Key="OverviewUp" Color="#76CC97"/>
+ <SolidColorBrush x:Key="OverviewTrack" Color="#454B56"/>
+</ResourceDictionary>

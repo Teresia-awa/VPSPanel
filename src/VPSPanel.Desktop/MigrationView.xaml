@@ -1,0 +1,41 @@
+<UserControl x:Class="VPSPanel.Desktop.MigrationView" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel>
+  <Border Style="{StaticResource PanelCard}"><StackPanel>
+   <TextBlock Text="一键备份 / 导出" FontSize="18" FontWeight="SemiBold"/>
+   <TextBlock Text="加密保存入口身份、出口、规则、地理数据及匹配版本内核。出口与规则采用当前主机的本机草稿。" TextWrapping="Wrap" Margin="0,4,0,8"/>
+   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+   <StackPanel Margin="0,0,8,0"><Label Content="备份口令"/><PasswordBox x:Name="Password"/></StackPanel>
+   <StackPanel Grid.Column="1"><Label Content="确认口令"/><PasswordBox x:Name="Confirm"/></StackPanel></Grid>
+   <Label Content="客户端原入口 IP 或自有域名"/><TextBox x:Name="ClientHost"/>
+   <Label Content="保存位置"/><DockPanel><Button DockPanel.Dock="Right" Content="浏览…" Margin="8,0,0,0" Click="ChooseSave"/><TextBox x:Name="SavePath"/></DockPanel>
+   <Expander Header="离线安装材料目录" Margin="0,8"><DockPanel><Button DockPanel.Dock="Right" Content="浏览…" Click="ChooseAssets"/><TextBox x:Name="Assets"/></DockPanel></Expander>
+   <WrapPanel><Button x:Name="ExportButton" Style="{StaticResource PanelAccentButton}" Content="导出并验证备份" Click="Export"/>
+    <Button x:Name="InspectButton" Content="只读核查服务来源" Margin="8,0,0,0" Click="Inspect"/></WrapPanel>
+   <TextBlock x:Name="ExportNotice" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+   <TextBlock x:Name="Inspection" Margin="0,6,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+  </StackPanel></Border>
+  <Border Style="{StaticResource PanelCard}" Margin="0,12,0,0"><StackPanel>
+   <TextBlock Text="更换 VPS / 恢复" FontSize="18" FontWeight="SemiBold"/>
+   <Label Content="恢复包"/><DockPanel><Button DockPanel.Dock="Right" Content="浏览…" Margin="8,0,0,0" Click="ChooseOpen"/><TextBox x:Name="OpenPath"/></DockPanel>
+   <Label Content="备份口令"/><PasswordBox x:Name="RestorePassword"/>
+   <WrapPanel Margin="0,10"><RadioButton Content="SSH 别名" x:Name="Alias" IsChecked="True" GroupName="migrationSSH" Checked="Mode"/><RadioButton Content="主机直连" Margin="16,0" x:Name="Direct" GroupName="migrationSSH" Checked="Mode"/></WrapPanel>
+   <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+    <StackPanel Margin="0,0,8,0"><Label x:Name="HostLabel" Content="SSH 别名"/><TextBox x:Name="Host"/></StackPanel>
+    <StackPanel x:Name="PortPanel" Visibility="Collapsed" Grid.Column="1" Margin="0,0,8,0"><Label Content="SSH 端口"/><TextBox x:Name="Port" Text="22"/></StackPanel>
+    <StackPanel x:Name="UserPanel" Visibility="Collapsed" Grid.Column="2"><Label Content="SSH 用户名"/><TextBox x:Name="User"/></StackPanel>
+   </Grid>
+   <StackPanel x:Name="AuthPanel" Visibility="Collapsed">
+    <WrapPanel Margin="0,8"><RadioButton Content="密码登录" x:Name="PassMode" IsChecked="True" GroupName="migrationAuth" Checked="Mode"/><RadioButton Content="指定私钥文件" Margin="16,0" x:Name="KeyMode" GroupName="migrationAuth" Checked="Mode"/></WrapPanel>
+    <DockPanel x:Name="KeyPanel" Visibility="Collapsed"><Button DockPanel.Dock="Right" Content="选择私钥…" Click="ChooseKey"/><TextBox x:Name="KeyFile"/></DockPanel>
+    <Label x:Name="CredentialLabel" Content="SSH 密码"/><PasswordBox x:Name="Credential"/>
+   </StackPanel>
+   <Label Content="新主机对客户端公开的 IP 或域名"/><TextBox x:Name="PublicHost"/>
+   <WrapPanel Margin="0,12,0,0"><Button x:Name="VerifyButton" Content="仅校验恢复包" Click="Verify"/><Button x:Name="RestoreButton" Style="{StaticResource PanelAccentButton}" Margin="8,0" Content="恢复到目标 VPS" Click="Restore"/></WrapPanel>
+  </StackPanel></Border>
+  <TextBlock x:Name="Notice" TextWrapping="Wrap" Margin="4,10" AutomationProperties.LiveSetting="Polite"/>
+  <TextBox x:Name="Result" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="160" VerticalScrollBarVisibility="Auto"/>
+  <Border Style="{StaticResource PanelCard}"><StackPanel><TextBlock Text="最近导入导出记录" FontWeight="SemiBold" Margin="0,0,0,8"/><DataGrid x:Name="Events" Style="{StaticResource ReadTable}"><DataGrid.Columns>
+   <DataGridTextColumn Header="时间" Binding="{Binding Time,StringFormat={}{0:yyyy-MM-dd HH:mm}}" ElementStyle="{StaticResource GridText}"/><DataGridTextColumn Header="操作" Binding="{Binding Operation}" ElementStyle="{StaticResource GridText}"/><DataGridTextColumn Header="验证状态" Width="2*" Binding="{Binding Status}" ElementStyle="{StaticResource GridText}"/>
+  </DataGrid.Columns></DataGrid></StackPanel></Border>
+ </StackPanel></ScrollViewer>
+</UserControl>

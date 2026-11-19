@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <OutputType>WinExe</OutputType>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../VPSPanel.Core/VPSPanel.Core.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="VPSPanel.Tests" /></ItemGroup>
+  <Target Name="PublishPreparedRecoveryAssets" AfterTargets="Publish">
+    <PropertyGroup>
+      <_AssetCache>$(LOCALAPPDATA)/VPSPanel/recovery-assets</_AssetCache>
+    </PropertyGroup>
+    <ItemGroup>
+      <_AssetName Include="assets.json;xray;relay;geoip.dat;geosite.dat" />
+      <_AssetFile Include="@(_AssetName->'$(_AssetCache)/%(Identity)')" />
+      <_MissingAsset Include="@(_AssetFile)" Condition="!Exists('%(Identity)')" />
+    </ItemGroup>
+    <Copy Condition="'@(_MissingAsset)' == ''" SourceFiles="@(_AssetFile)" DestinationFolder="$(PublishDir)/recovery-assets" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

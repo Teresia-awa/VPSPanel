@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+guard="$(dirname "$0")/../src/VPSPanel.Guard/VPSPanel.Guard.csproj"
+exec dotnet run --project "$guard" --no-launch-profile -- pre-commit "$(git rev-parse --show-toplevel)"

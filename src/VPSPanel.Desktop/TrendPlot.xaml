@@ -1,0 +1,16 @@
+<UserControl x:Class="VPSPanel.Desktop.TrendPlot"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ SizeChanged="Resized" IsHitTestVisible="False">
+ <Grid x:Name="Surface" ClipToBounds="True">
+  <UniformGrid x:Name="Guides" Rows="4" IsHitTestVisible="False">
+   <UniformGrid.Resources><Style TargetType="Border"><Setter Property="BorderBrush" Value="{DynamicResource OverviewGridLine}"/><Setter Property="BorderThickness" Value="0,0,0,1"/></Style></UniformGrid.Resources>
+   <Border/><Border/><Border/><Border/>
+  </UniformGrid>
+  <Canvas>
+   <Path x:Name="Area" Fill="{DynamicResource OverviewDown}" Opacity=".10"/>
+   <Path x:Name="First" Stroke="{DynamicResource OverviewDown}" StrokeThickness="2.2" StrokeLineJoin="Round"/>
+   <Path x:Name="Second" Stroke="{DynamicResource OverviewUp}" StrokeThickness="2" StrokeLineJoin="Round"/>
+   <Ellipse x:Name="Tip" Width="5" Height="5" Fill="{DynamicResource OverviewDown}" Visibility="Collapsed"/>
+  </Canvas>
+ </Grid>
+</UserControl>

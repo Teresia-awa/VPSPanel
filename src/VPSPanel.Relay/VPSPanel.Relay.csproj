@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><InvariantGlobalization>true</InvariantGlobalization></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../VPSPanel.Core/VPSPanel.Core.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="VPSPanel.Tests" /></ItemGroup>
+</Project>

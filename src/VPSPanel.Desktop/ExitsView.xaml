@@ -1,0 +1,41 @@
+<UserControl x:Class="VPSPanel.Desktop.ExitsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:VPSPanel.Desktop">
+ <Grid>
+  <Grid.ColumnDefinitions><ColumnDefinition Width="0.83*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="1.17*"/></Grid.ColumnDefinitions>
+  <DockPanel>
+   <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10"><Button DockPanel.Dock="Right" x:Name="AddButton" Content="＋ 添加出口" Click="Add"/><TextBlock Text="已配置出口" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="18"/></DockPanel>
+   <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" x:Name="ContextText" Margin="0,0,0,8" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+   <ListBox x:Name="List" SelectionChanged="SelectExit" BorderThickness="0" HorizontalContentAlignment="Stretch" Background="{x:Null}" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+    <ListBox.ItemTemplate><DataTemplate><Border Style="{StaticResource PanelCard}" Margin="0,3"><StackPanel>
+     <TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap"/>
+     <WrapPanel Margin="0,4,0,8"><TextBlock Text="{Binding Protocol}"/><TextBlock Margin="12,0,0,0" Text="{Binding Status}" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/></WrapPanel>
+     <TextBlock TextWrapping="Wrap"><Run Text="连接域名　"/><Run Text="{Binding Host, Mode=OneWay}"/></TextBlock>
+     <TextBlock TextWrapping="Wrap"><Run Text="TLS 名称　"/><Run Text="{Binding Sni, Mode=OneWay}"/></TextBlock>
+     <TextBlock TextWrapping="Wrap"><Run Text="备用域名　"/><Run Text="{Binding AliasText, Mode=OneWay}"/></TextBlock>
+    </StackPanel></Border></DataTemplate></ListBox.ItemTemplate>
+   </ListBox>
+  </DockPanel>
+  <Border Grid.Column="2" Style="{StaticResource PanelCard}">
+   <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="Editor" Margin="0,0,6,0">
+    <TextBlock x:Name="EditTitle" Text="编辑出口" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,10"/>
+    <Expander x:Name="ImportPane" Header="导入分享链接" Margin="0,0,0,10"><DockPanel Margin="3,8">
+     <Button x:Name="ImportButton" DockPanel.Dock="Right" Content="解析链接" Margin="8,0,0,0" Click="Import"/><PasswordBox x:Name="Link" AutomationProperties.Name="节点分享链接"/>
+    </DockPanel></Expander>
+    <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel Margin="0,0,0,9"><TextBlock Text="出口名称" Margin="0,0,0,4"/><TextBox x:Name="ExitName" AutomationProperties.Name="出口名称"/></StackPanel><StackPanel Grid.Column="2"><StackPanel Margin="0,0,0,9"><TextBlock Text="稳定 ID · 创建后锁定" Margin="0,0,0,4"/><TextBox x:Name="StableId" AutomationProperties.Name="稳定 ID"/></StackPanel></StackPanel></Grid>
+    <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel Margin="0,0,0,9"><TextBlock Text="协议" Margin="0,0,0,4"/><ComboBox x:Name="Protocol" SelectionChanged="ProtocolChanged"><ComboBoxItem Content="HY2"/><ComboBoxItem Content="VLESS REALITY"/></ComboBox></StackPanel><StackPanel Grid.Column="2"><StackPanel Margin="0,0,0,9"><TextBlock Text="端口" Margin="0,0,0,4"/><TextBox x:Name="Port" AutomationProperties.Name="出口端口"/></StackPanel></StackPanel></Grid>
+    <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel Margin="0,0,0,9"><TextBlock Text="连接域名" Margin="0,0,0,4"/><TextBox x:Name="Host" AutomationProperties.Name="连接域名"/></StackPanel><StackPanel Grid.Column="2"><StackPanel Margin="0,0,0,9"><TextBlock Text="TLS 名称（SNI）" Margin="0,0,0,4"/><TextBox x:Name="Sni" AutomationProperties.Name="TLS 名称"/></StackPanel></StackPanel></Grid>
+    <TextBlock x:Name="AuthLabel" Text="认证口令" Margin="0,0,0,4"/><PasswordBox x:Name="Auth" AutomationProperties.Name="出口认证信息"/>
+    <Expander x:Name="Advanced" Header="REALITY 高级参数" Margin="0,8,0,0"><StackPanel Margin="4,8">
+     <StackPanel Margin="0,0,0,9"><TextBlock Text="公钥" Margin="0,0,0,4"/><TextBox x:Name="Public" AutomationProperties.Name="REALITY 公钥"/></StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel Margin="0,0,0,9"><TextBlock Text="Short ID" Margin="0,0,0,4"/><TextBox x:Name="Short" AutomationProperties.Name="Short ID"/></StackPanel><StackPanel Grid.Column="2"><StackPanel Margin="0,0,0,9"><TextBlock Text="Fingerprint" Margin="0,0,0,4"/><TextBox x:Name="Fingerprint" AutomationProperties.Name="Fingerprint"/></StackPanel></StackPanel></Grid><StackPanel Margin="0,0,0,9"><TextBlock Text="Flow" Margin="0,0,0,4"/><TextBox x:Name="Flow" AutomationProperties.Name="Flow"/></StackPanel>
+    </StackPanel></Expander>
+    <TextBlock Text="备用二级域名" Margin="0,12,0,4"/><TextBox x:Name="Aliases" AcceptsReturn="True" MinHeight="54" MaxHeight="100" VerticalScrollBarVisibility="Auto" TextChanged="AliasesChanged" AutomationProperties.Name="备用域名，每行一个"/>
+    <DockPanel Margin="0,6,0,12"><Button x:Name="AliasButton" DockPanel.Dock="Right" Content="选作连接域名" Margin="8,0,0,0" Click="ChooseAlias"/><ComboBox x:Name="Candidates" AutomationProperties.Name="选择备用域名"/></DockPanel>
+    <CheckBox x:Name="EnabledBox" Content="启用此出口"/><CheckBox x:Name="Limit" Margin="0,8" Content="启用单出口双向限速"/>
+    <StackPanel IsEnabled="{Binding IsChecked, ElementName=Limit}"><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel Margin="0,0,0,9"><TextBlock Text="上传 Mbps" Margin="0,0,0,4"/><TextBox x:Name="Upload" AutomationProperties.Name="上传 Mbps"/></StackPanel><StackPanel Grid.Column="2"><StackPanel Margin="0,0,0,9"><TextBlock Text="下载 Mbps" Margin="0,0,0,4"/><TextBox x:Name="Download" AutomationProperties.Name="下载 Mbps"/></StackPanel></StackPanel></Grid></StackPanel>
+    <TextBlock x:Name="ProbeText" Margin="0,6" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+    <WrapPanel><Button x:Name="ProbeButton" Content="预检 / 探活" Click="Probe" Margin="0,0,6,5"/><Button x:Name="SaveButton" Content="保存本地草稿" Click="Save" Margin="0,0,6,5"/><Button x:Name="DeleteButton" Content="删除出口" Click="Delete" Margin="0,0,0,5"/></WrapPanel>
+    <local:PublishView x:Name="Publisher"/>
+   </StackPanel></ScrollViewer>
+  </Border>
+ </Grid>
+</UserControl>

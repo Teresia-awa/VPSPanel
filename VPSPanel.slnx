@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VPSPanel.Core/VPSPanel.Core.csproj" />
+    <Project Path="src/VPSPanel.Desktop/VPSPanel.Desktop.csproj" />
+    <Project Path="src/VPSPanel.Guard/VPSPanel.Guard.csproj" />
+    <Project Path="src/VPSPanel.Relay/VPSPanel.Relay.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VPSPanel.Tests/VPSPanel.Tests.csproj" />
+  </Folder>
+</Solution>

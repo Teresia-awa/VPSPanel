@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework></TargetFramework>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup><PackageReference Include="protobuf-net" Version="3.2.56" /><PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" /></ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <PackageReference Include="SSH.NET" Version="2026.0.1" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <Compile Remove="Windows/*.cs" />
+  </ItemGroup>
+  <ItemGroup><EmbeddedResource Include="Migration/install.sh" LogicalName="VPSPanel.install.sh" /></ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'"><EmbeddedResource Include="Windows/publication.py" LogicalName="VPSPanel.publication.py" /></ItemGroup>
+</Project>
