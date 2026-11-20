@@ -50,10 +50,8 @@ public sealed class GeoCatalog(string directory)
     internal Func<string, bool> Sites(string key)
     {
         if (siteCache.TryGetValue(key, out var cached)) return cached;
-        var parts = key.Split('@');
-        var group = Load<Site>("geosite.dat", s => s.Code.Equals(parts[0], StringComparison.OrdinalIgnoreCase));
         HashSet<string> full = [], suffix = []; List<string> contains = []; List<Regex> regex = [];
-        foreach (var d in group.Entries.Where(d => parts.Skip(1).All(attr => d.Attributes.Any(a => a.Key.Equals(attr, StringComparison.OrdinalIgnoreCase)))))
+        foreach (var d in SiteEntries(key))
         {
             var value = d.Value.ToLowerInvariant();
             switch (d.Type)
@@ -72,6 +70,32 @@ public sealed class GeoCatalog(string directory)
             return contains.Any(host.Contains) || regex.Any(r => r.IsMatch(host));
         };
     }
+    private IEnumerable<DomainEntry> SiteEntries(string key)
+    {
+        var parts = key.Split('@');
+        var group = Load<Site>("geosite.dat", s => s.Code.Equals(parts[0], StringComparison.OrdinalIgnoreCase));
+        return group.Entries.Where(d => parts.Skip(1).All(attr => d.Attributes.Any(a => a.Key.Equals(attr, StringComparison.OrdinalIgnoreCase))));
+    }
+
+    public (byte[] Data, string Generation) BootstrapAsset(RelayPlan plan)
+    {
+        var site = new Site { Code = "BINDINGS" };
+        foreach (var rule in plan.BootstrapDomains())
+        {
+            var pair = rule.Split(':', 2);
+            if (pair[0] == "geosite") site.Entries.AddRange(SiteEntries(pair[1]));
+            else site.Entries.Add(new DomainEntry { Type = pair[0] == "full" ? 3 : 2, Value = pair[1] });
+        }
+        using var data = new MemoryStream();
+        Serializer.SerializeWithLengthPrefix(data, site, PrefixStyle.Base128, 1);
+        var digest = System.Security.Cryptography.SHA256.HashData(data.GetBuffer().AsSpan(0, (int)data.Length));
+        var generation = Convert.ToHexStringLower(digest.AsSpan(0, 24)) + ".invalid";
+        var proof = new Site { Code = "GENERATION" };
+        proof.Entries.Add(new DomainEntry { Type = 3, Value = generation });
+        Serializer.SerializeWithLengthPrefix(data, proof, PrefixStyle.Base128, 1);
+        return (data.ToArray(), generation);
+    }
+
     internal Func<IPAddress, bool> Networks(string key)
     {
         if (ipCache.TryGetValue(key, out var cached)) return cached;

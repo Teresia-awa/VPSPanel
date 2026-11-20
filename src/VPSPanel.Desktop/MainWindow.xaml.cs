@@ -12,7 +12,8 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource lifetime = new();
     private string? overviewTheme;
     private readonly PanelSession session;
-    private bool loadingFailureChoices;
+    private bool loadingFailureChoices, loadingEncryptedDns, dnsEditorDirty;
+    private SshTarget? dnsEditorTarget;
     private sealed record FailureChoice(ExitFailurePolicy Policy,string Label);
 
     internal static string Message(Exception ex) => ex switch
@@ -55,6 +56,10 @@ public partial class MainWindow : Window
         FailurePublisher.Attach(session,lifetime.Token);
         session.Changed+=RefreshFailureChoices;
         RefreshFailureChoices();
+        EncryptedDnsPublisher.Attach(session,lifetime.Token);
+        EncryptedDnsPublisher.HasUnsavedForm = () => dnsEditorDirty;
+        session.Changed+=RefreshEncryptedDns;
+        RefreshEncryptedDns();
         Closed += (_, _) => { lifetime.Cancel(); session.ClearSessionCredentials(); };
     }
 
@@ -85,6 +90,65 @@ public partial class MainWindow : Window
             session.SaveRules(host.Policy.WithFailurePolicy(choice.Policy),host.Total??new());
             FailureNotice.Text="已保存到本地主机草稿。应用到 VPS 后对新连接生效。";
         } catch(Exception ex){RefreshFailureChoices();FailureNotice.Text=Message(ex);}
+    }
+
+    private void RefreshEncryptedDns()
+    {
+        loadingEncryptedDns=true;
+        try
+        {
+            var host=session.Current;
+            bool available=!session.IsDemo && host?.ManagedRevision!=null;
+            if (!available || dnsEditorTarget != host!.Target || !dnsEditorDirty)
+            {
+                dnsEditorTarget = host?.Target;
+                dnsEditorDirty = false;
+                var configured = host?.ManagedDohResolvers;
+                DnsResolverMode.SelectedValue = configured is null ? "Existing" : "Managed";
+                DohAddresses.Text = string.Join(Environment.NewLine, configured ?? ["https://1.1.1.1/dns-query","https://8.8.8.8/dns-query"]);
+                BootstrapAddresses.Text = string.Join(Environment.NewLine,host?.Bootstrap ?? DohResolvers.Domestic);
+            }
+            DnsResolverMode.IsEnabled = available;
+            SaveDohDraft.IsEnabled = available;
+            DohEditor.Visibility = Equals(DnsResolverMode.SelectedValue, "Managed") ? Visibility.Visible : Visibility.Collapsed;
+            EncryptedDnsNotice.Text=!available?"请先在首页读取已接管的主机。":
+                host!.FollowHealthyDnsDraft!=null || host.DnsResolversDraft!=null?"已保存为本地草稿，确认发布后生效。":
+                host.DeployedDohResolvers!=null?"服务器正在使用托管 DNS。":"服务器当前沿用原有 DNS。";
+        }
+        finally { loadingEncryptedDns=false; }
+    }
+
+    private void DnsResolverEdited(object sender, RoutedEventArgs e)
+    {
+        if (loadingEncryptedDns || DohEditor is null || SaveDohDraft is null || !SaveDohDraft.IsEnabled) return;
+        DohEditor.Visibility = Equals(DnsResolverMode.SelectedValue, "Managed") ? Visibility.Visible : Visibility.Collapsed;
+        var saved = session.Current?.ManagedDohResolvers;
+        dnsEditorDirty = Equals(DnsResolverMode.SelectedValue, "Managed")
+            ? saved is null || DohAddresses.Text != string.Join(Environment.NewLine, saved) || BootstrapAddresses.Text != string.Join(Environment.NewLine,session.Current?.Bootstrap ?? []) : saved is not null;
+        if (dnsEditorDirty) EncryptedDnsNotice.Text = "当前修改尚未保存为草稿。";
+    }
+
+    private void FillDohPreset(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string address }) return;
+        if (address is "Domestic" or "Overseas")
+            BootstrapAddresses.Text = string.Join(Environment.NewLine,address == "Domestic" ? DohResolvers.Domestic : DohResolvers.Overseas);
+        else DohAddresses.Text = address;
+    }
+
+    private void SaveDnsResolvers(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var resolvers = Equals(DnsResolverMode.SelectedValue, "Managed") ? DohResolvers.Parse(DohAddresses.Text) : null;
+            dnsEditorDirty = false;
+            session.SaveDohResolvers(resolvers, resolvers is null ? null : DohResolvers.Parse(BootstrapAddresses.Text,true));
+        }
+        catch (Exception ex)
+        {
+            dnsEditorDirty = true;
+            EncryptedDnsNotice.Text = Message(ex);
+        }
     }
 
     protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)

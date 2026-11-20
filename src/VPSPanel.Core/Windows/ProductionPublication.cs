@@ -8,17 +8,18 @@ namespace VPSPanel.Core;
 public sealed record PublicationTicket(string Id, string Before, string Desired, string[] Changes);
 public sealed class PublicationPreview
 {
-    internal PublicationPreview(ManagedHost host,string revision,string basePlanDigest,RelayPlan plan,string[] changes)
+    internal PublicationPreview(ManagedHost host,string revision,string basePlanDigest,RelayPlan plan,string[] changes,bool requiresXrayRestart)
     {
-        Host=host; Revision=revision; BasePlanDigest=basePlanDigest; Plan=plan; Changes=Array.AsReadOnly(changes);
+        Host=host; Revision=revision; BasePlanDigest=basePlanDigest; Plan=plan; Changes=Array.AsReadOnly(changes); RequiresXrayRestart=requiresXrayRestart;
     }
     internal ManagedHost Host { get; }
     internal string Revision { get; }
     internal string BasePlanDigest { get; }
     internal RelayPlan Plan { get; }
     public IReadOnlyList<string> Changes { get; }
+    public bool RequiresXrayRestart { get; }
 }
-internal sealed record PublishedState(string Revision, RelayPlan Plan, string Source, string CheckUrl, bool SupportsDefaultRoute = false, bool SupportsExitFailover = false)
+internal sealed record PublishedState(string Revision, RelayPlan Plan, string Source, string CheckUrl, bool SupportsDefaultRoute = false, bool SupportsExitFailover = false, bool SupportsEncryptedDnsRouting = false, bool SupportsDnsFailurePolicy = false, bool XrayDnsFallbackReady = false, bool SupportsManagedDoh = false, string? ServerDnsMode = null, JsonObject? OriginalDns = null, bool SupportsSplitDoh = false, bool? UsesBootstrapAsset = null, JsonObject? OriginalGeodata = null)
 {
     internal ExitWorkspace Rebase(XraySnapshot original, ExitWorkspace? local, ExitWorkspace? backup)
     {
@@ -27,14 +28,14 @@ internal sealed record PublishedState(string Revision, RelayPlan Plan, string So
             var p = XraySnapshot.ReadExit(e.Outbound, e.Id) ?? throw new PanelException("已部署出口协议不受支持。");
             var previous = local?.Items.FirstOrDefault(i => i.Id == e.Id)??backup?.Items.FirstOrDefault(i=>i.Id==e.Id);
             return p with { Name=e.Name, Enabled=e.Enabled, Limited=e.Limit.Enabled, Up=(decimal)e.Limit.Upload,
-                Down=(decimal)e.Limit.Download, Aliases=previous?.Aliases.Where(a=>!a.Equals(p.Host,StringComparison.OrdinalIgnoreCase)).ToArray()??[],
+                Down=(decimal)e.Limit.Download, Aliases=(e.Aliases ?? previous?.Aliases)?.Where(a=>!a.Equals(p.Host,StringComparison.OrdinalIgnoreCase)).ToArray()??[],
                 LastProbe=previous!=null && JsonNode.DeepEquals(previous.ToOutbound(),p.ToOutbound()) ? previous.LastProbe : null };
         }).ToArray();
         var direct=Plan.Exits.SingleOrDefault(e=>e.Direct);
         var outbounds=Plan.Exits.Select(e=>new ExitSummary(e.Id,e.Outbound["protocol"]!.ToString(),e.Direct?"中转直连":profiles.Single(p=>p.Id==e.Id).Protocol));
         var snapshot=original with { Editable=profiles, Outbounds=outbounds.ToArray(), DirectOutbound=direct?.Outbound, ImportedPolicy=Plan.Policy };
         bool Matches(ExitProfile a,ExitProfile? b)=>b!=null && a.Name==b.Name && a.Enabled==b.Enabled && a.Limited==b.Limited &&
-            a.Up==b.Up && a.Down==b.Down && JsonNode.DeepEquals(a.ToOutbound(),b.ToOutbound());
+            a.Up==b.Up && a.Down==b.Down && a.Aliases.SequenceEqual(b.Aliases) && JsonNode.DeepEquals(a.ToOutbound(),b.ToOutbound());
         var drafts=local?.Drafts.Where(d=>!Matches(d,profiles.FirstOrDefault(x=>x.Id==d.Id)) &&
             !Matches(d,local.Snapshot?.Editable.FirstOrDefault(x=>x.Id==d.Id))).ToList()??[];
         return new(snapshot,drafts,local?.Deleted.Where(id=>profiles.Any(p=>p.Id==id)).ToList()??[]);
@@ -62,9 +63,9 @@ internal static class PublicationRemote
             _=>"无法读取接管服务状态或管理文件，请检查 SSH 权限及目标服务。"});
         return reply;
     }
-    internal static async Task<PublishedState> Inspect(ISshTransport io,SshTarget target,CancellationToken ct)
+    internal static async Task<PublishedState> Inspect(ISshTransport io,SshTarget target,CancellationToken ct,bool includeDnsSource=false)
     {
-        var reply=await Call(io,new {Op="inspect",target.Service},ct);
+        var reply=await Call(io,new {Op="inspect",target.Service,IncludeDnsSource=includeDnsSource},ct);
         return reply.Current??throw new PanelException("Relay 正在处理其他事务，请稍后重新预览。");
     }
 }
@@ -96,6 +97,7 @@ internal static class PlanChanges
             }
         }
         Diff("出口",old.Exits,next.Exits,e=>e.Id,e=>e.Name,(a,b,label)=>{
+            if(!Equal(a.Aliases,b.Aliases))lines.Add($"{label}　更新备用域名");
             if(a.Name!=b.Name)lines.Add($"{label}　名称 {a.Name} → {b.Name}");
             if(a.Enabled!=b.Enabled)lines.Add($"{label}　{On(a.Enabled)} → {On(b.Enabled)}");
             if(a.Limit!=b.Limit)lines.Add($"{label}　限速 {Rate(a.Limit)} → {Rate(b.Limit)}");
@@ -134,6 +136,16 @@ internal static class PlanChanges
         if(!oldRules.Select(r=>r.Id).SequenceEqual(newRules.Select(r=>r.Id)))
             lines.Add("匹配顺序　"+string.Join(" → ",newRules.Select(r=>r.Name).Append("默认："+fallback)));
         if(old.Total!=next.Total)lines.Add($"整体限速　{Rate(old.Total)} → {Rate(next.Total)}");
+        if(!Equal(old.ManagedDohResolvers,next.ManagedDohResolvers))
+            lines.Add(next.ManagedDohResolvers is { } resolvers
+                ? $"Xray DNS 解析器　应用面板中的 {resolvers.Length} 个 DoH 地址"
+                : "Xray DNS 解析器　恢复服务器原有配置");
+        if(old.FollowHealthyDns!=next.FollowHealthyDns)
+            lines.Add(next.FollowHealthyDns?"加密 DNS　跟随健康上游":"加密 DNS　恢复服务器原有出站");
+        if (!Equal(old.BootstrapDohResolvers, next.BootstrapDohResolvers))
+            lines.Add("更新直连与节点引导 DoH");
+        if (next.ManagedDohResolvers != null && !old.BootstrapDomains().SequenceEqual(next.BootstrapDomains()))
+            lines.Add("同步直连规则与节点域名绑定");
         return lines.ToArray();
     }
 }
@@ -147,6 +159,11 @@ public sealed partial class PanelSession
         var remote=await PublicationRemote.Inspect(RelayTransport(host),host.Target,ct);
         if(Current!=host || remote.Revision!=host.ManagedRevision)throw new PanelException("主机或已部署配置已变化，请重新只读读取并预览。");
         var draft=BuildRelayPlan();
+        if(draft.FollowHealthyDns!=remote.Plan.FollowHealthyDns && !remote.SupportsEncryptedDnsRouting)
+            throw new PanelException("当前 VPS 的 Relay 尚未支持加密 DNS 路由。请升级 Relay，DNS 草稿已保留。");
+        bool requiresRestart = !draft.SameDns(remote.Plan) || draft.ManagedDohResolvers != null && remote.UsesBootstrapAsset == false;
+        if((requiresRestart || draft.ManagedDohResolvers!=null) && !remote.SupportsSplitDoh)
+            throw new PanelException("请升级 Relay 后再应用双栏 DoH 配置。");
         if(draft.Policy.OnUnavailable.Action!=FailureAction.Reject && !remote.SupportsExitFailover)
             throw new PanelException("当前 VPS 的 Relay 尚未支持出口故障策略。请升级后再应用，草稿已保留。");
         if(draft.Policy.DefaultRule!=null && !remote.SupportsDefaultRoute)
@@ -156,11 +173,14 @@ public sealed partial class PanelSession
             var old=remote.Plan.Exits.FirstOrDefault(x=>x.Id==e.Id);
             if(old==null)return e;
             if(e.Direct)return old;
+            if(old.Aliases!=null && e.Aliases==null)e=e with {Aliases=[]};
             var p=XraySnapshot.ReadExit(old.Outbound,old.Id);
             return p!=null && JsonNode.DeepEquals(p.ToOutbound(),e.Outbound)?e with{Outbound=old.Outbound}:e;
         }).ToArray();
         var next=draft with{Exits=exits};
-        return new(host,remote.Revision,PlanChanges.Digest(remote.Plan),next,PlanChanges.Compare(remote.Plan,next));
+        var changes=PlanChanges.Compare(remote.Plan,next);
+        if(requiresRestart) changes=[.. changes,"重启 Xray 并校验解析器，失败时自动恢复"];
+        return new(host,remote.Revision,PlanChanges.Digest(remote.Plan),next,changes,requiresRestart);
     }
 
     public async Task<string> ApplyProduction(PublicationPreview preview,CancellationToken ct)
@@ -172,11 +192,16 @@ public sealed partial class PanelSession
         var io=RelayTransport(host);
         var ticket=new PublicationTicket(Guid.NewGuid().ToString("N"),preview.BasePlanDigest,PlanChanges.Digest(preview.Plan),preview.Changes.ToArray());
         Write(book.Selected!,host with{Publication=ticket});
-        var reply=await PublicationRemote.Call(io,new {Op="submit",host.Target.Service,ticket.Id,preview.Revision,preview.Plan},ct);
-        if(reply.Status!="submitted")throw new PanelException(reply.Status=="stale"?"VPS 配置在预览后有变更，本次未提交。请重新读取并预览。":"其他事务正在处理，本次未提交。");
+        var reply=await PublicationRemote.Call(io,new {Op="submit",host.Target.Service,ticket.Id,preview.Revision,preview.Plan,RestartXray=preview.RequiresXrayRestart},ct);
+        if(reply.Status!="submitted")throw new PanelException(reply.Status switch {
+            "stale"=>"VPS 配置在预览后有变更，本次未提交。请重新读取并预览。",
+            "needs-restart"=>"重新预览并确认 Xray 重启后才能应用 DNS 变更。",
+            _=>"其他事务正在处理，本次未提交。"});
         for(int i=0;i<90;i++){
             await Task.Delay(1000,ct);
-            var result=await PublicationRemote.Call(io,new {Op="result",host.Target.Service,ticket.Id},ct);
+            PublicationRemote.Reply result;
+            try { result=await PublicationRemote.Call(io,new {Op="result",host.Target.Service,ticket.Id},ct); }
+            catch(PanelException) when (preview.RequiresXrayRestart && !ct.IsCancellationRequested) { continue; }
             if(result.Status is "applied" or "rejected")return FinishPublication(host.Target,ticket,result);
         }
         return "已提交，回执尚未返回。可用「核对上次应用」继续查询。";
@@ -201,7 +226,13 @@ public sealed partial class PanelSession
             var deployed=reply.Current;
             var workspace=deployed.Rebase(host.Workspace.Snapshot!,host.Workspace,null);
             Write(book.Selected!,host with{ManagedRevision=deployed.Revision,Workspace=workspace,
-                Rules=PlanChanges.Equal(host.Policy,deployed.Plan.Policy)?null:host.Rules,DeployedTotal=deployed.Plan.Total});
+                Rules=PlanChanges.Equal(host.Policy,deployed.Plan.Policy)?null:host.Rules,DeployedTotal=deployed.Plan.Total,
+                FollowHealthyDnsDraft=host.FollowHealthyDns==deployed.Plan.FollowHealthyDns?null:host.FollowHealthyDnsDraft,
+                DeployedFollowHealthyDns=deployed.Plan.FollowHealthyDns,
+                DnsOnFailureDraft=host.DnsOnFailure==deployed.Plan.DnsOnFailure?null:host.DnsOnFailureDraft,
+                DeployedDnsOnFailure=deployed.Plan.DnsOnFailure,
+                DnsResolversDraft=PlanChanges.Equal(host.ManagedDohResolvers,deployed.Plan.ManagedDohResolvers)?null:host.DnsResolversDraft,
+                DeployedBootstrap=deployed.Plan.BootstrapDohResolvers,DeployedDohResolvers=deployed.Plan.ManagedDohResolvers,ServerDnsMode=deployed.ServerDnsMode});
             Changed?.Invoke();
         }
         return "已生效（Relay 回执与 VPS 持久方案一致）\n"+string.Join("\n",ticket.Changes.Select(c=>"✓ "+c));

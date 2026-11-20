@@ -47,8 +47,12 @@ internal static class RestoreRuntime
         var used=raw["inbounds"]!.AsArray().Select(i=>int.TryParse(i?["port"]?.ToString(),out int p)?p:0).ToHashSet();
         var options=new RelayOptions("/var/lib/vpspanel/xray",Port(used),Port(used),profile.CheckUrl);
         var root=RecoveryLayout.RouteUsers(raw,options.ApiPort,options.ListenPort);
-        var state=new RuntimeState(plan,plan.Exits.Where(e=>e.Enabled).Select(e=>new Lane(e.Id,"vp3-"+Guid.NewGuid().ToString("N"),Port(used))).ToArray());
-        Disk.Write(Path.Combine(dir,"xray.json"),XrayManager.Compose(root.ToJsonString(),state,[]).ToJsonString());
+        var state=new RuntimeState(plan,plan.Exits.Where(e=>e.Enabled).Select(e=>new Lane(e.Id,"vp3-"+Guid.NewGuid().ToString("N"),Port(used))).ToArray())
+        { PreviousDns = plan.ManagedDohResolvers != null ? EncryptedDnsRoute.OriginalDns(raw["dns"]) : null,
+          PreviousGeodata = plan.ManagedDohResolvers != null ? raw["geodata"]?.DeepClone().AsObject() : null };
+        if (plan.ManagedDohResolvers != null)
+            BootstrapGeneration.WriteAsset(dir, new GeoCatalog(rulesDir).BootstrapAsset(plan).Data);
+        Disk.Write(Path.Combine(dir,"xray.json"),XrayManager.Compose(root.ToJsonString(),state,[],options.ListenPort).ToJsonString());
         Disk.Write(Path.Combine(dir,"committed.json"),JsonSerializer.Serialize(state));
         Disk.Write(Path.Combine(dir,"relay.json"),JsonSerializer.Serialize(options));
         Disk.Write(Path.Combine(dir,"manifest.json"),JsonSerializer.Serialize(manifest));
@@ -65,7 +69,16 @@ internal static class RestoreRuntime
         var token=deadline.Token;
         var url=new Uri(settings.CheckUrl);
         // Test each generation, including direct, through the pinned protocol transport.
-        foreach(var lane in state.Lanes)await Socks.Check(lane.Port,url,token);
+        foreach(var lane in state.Lanes)
+        {
+            for (int attempt=0; ; attempt++)
+            {
+                try { await Socks.Check(lane.Port,url,token,state.Plan.HealthResolvers(lane.Id)); break; }
+                catch (Exception ex) when (attempt<4 && !token.IsCancellationRequested &&
+                    ex is IOException or HttpRequestException or SocketException)
+                { await Task.Delay(500,token); }
+            }
+        }
         var users=RecoveryLayout.Clients(RecoveryLayout.Parse(File.ReadAllText(Path.Combine(dir,"portable.json"))));
         foreach(var user in users){
             int port=Port([]);

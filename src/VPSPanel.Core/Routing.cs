@@ -10,6 +10,33 @@ namespace VPSPanel.Core;
 
 [JsonConverter(typeof(JsonStringEnumConverter<RouteAction>))]
 public enum RouteAction { Auto, Direct, Fixed }
+[JsonConverter(typeof(JsonStringEnumConverter<DnsFailureAction>))]
+public enum DnsFailureAction { Reject, Direct, Plaintext }
+
+public static class DohResolvers
+{
+    public static string[] Domestic => ["https+local://223.5.5.5/dns-query", "https+local://1.12.12.12/dns-query"];
+    public static string[] Overseas => ["https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query"];
+    public static string[] Parse(string text, bool local = false) =>
+        Validate(text.Split(['\r', '\n'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), local);
+
+    public static string[] Validate(string[] urls, bool local = false)
+    {
+        if (urls.Length is < 1 or > 4)
+            throw new PanelException("请配置 1–4 个 DoH 地址，每行一个。");
+        var normalized = urls.Select(url =>
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != (local ? "https+local" : "https") ||
+                uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0 ||
+                !IPAddress.TryParse(uri.IdnHost.Trim('[', ']'), out var ip) || IPAddress.IsLoopback(ip))
+                throw new PanelException("DoH 地址须使用 IP 形式的 HTTPS URL，且不含账号、参数或片段。");
+            return uri.AbsoluteUri;
+        }).ToArray();
+        if (normalized.Distinct(StringComparer.Ordinal).Count() != normalized.Length)
+            throw new PanelException("DoH 地址重复。");
+        return normalized;
+    }
+}
 public enum FailureAction { Reject, Direct, Fixed, Auto, UseDefault }
 public readonly record struct ExitFailurePolicy(FailureAction Action, string? Exit = null)
 {
@@ -100,7 +127,11 @@ public sealed record Bandwidth(bool Enabled = false, double Upload = 0, double D
             throw new PanelException("开启限速需要正数上传和下载 Mbps。");
     }
 }
-public sealed record RelayExit(string Id, string Name, bool Direct, bool Enabled, Bandwidth Limit, JsonObject Outbound);
+public sealed record RelayExit(string Id, string Name, bool Direct, bool Enabled, Bandwidth Limit, JsonObject Outbound)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? Aliases { get; init; }
+}
 public sealed record ExitSetting(string Id, bool Enabled, Bandwidth Limit);
 public sealed record PolicyUpdate(RoutingPolicy Policy, Bandwidth Total, ExitSetting[] Settings)
 {
@@ -108,10 +139,58 @@ public sealed record PolicyUpdate(RoutingPolicy Policy, Bandwidth Total, ExitSet
     {
         var changes = Settings.ToDictionary(s => s.Id);
         if (changes.Keys.Except(plan.Exits.Select(e => e.Id)).Any()) throw new PanelException("规则方案含未部署的出口。");
-        return new(Policy, plan.Exits.Select(e => changes.TryGetValue(e.Id, out var c) ? e with { Enabled = c.Enabled, Limit = c.Limit } : e).ToArray(), Total);
+        return plan with { Policy = Policy, Total = Total,
+            Exits = plan.Exits.Select(e => changes.TryGetValue(e.Id, out var c) ? e with { Enabled = c.Enabled, Limit = c.Limit } : e).ToArray() };
     }
 }
-public sealed record RelayPlan(RoutingPolicy Policy, RelayExit[] Exits, Bandwidth Total);
+public sealed record RelayPlan(RoutingPolicy Policy, RelayExit[] Exits, Bandwidth Total)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool FollowHealthyDns { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public DnsFailureAction DnsOnFailure { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? ManagedDohResolvers { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? BootstrapDohResolvers { get; init; }
+
+    public string[] BootstrapDomains()
+    {
+        var domains = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var exit in Exits.Where(e => !e.Direct))
+        {
+            var settings = exit.Outbound["settings"];
+            var servers = settings?["vnext"] as JsonArray;
+            var hosts = servers?.Select(node => node?["address"]?.ToString()) ?? [settings?["address"]?.ToString()];
+            foreach (var host in hosts.Concat(exit.Aliases ?? []))
+                if (!string.IsNullOrEmpty(host) && !IPAddress.TryParse(host, out _))
+                    domains.Add("full:" + RuleEngine.Domain(host));
+        }
+        foreach (var rule in Policy.WebsiteRules.Where(r => r.Enabled && r.Action == RouteAction.Direct))
+        {
+            var group = rule.Group is null ? null : Policy.Groups.Single(g => g.Id == rule.Group);
+            if (group?.Enabled == false) continue;
+            foreach (var entry in group?.Entries ?? rule.Entries)
+            {
+                var pair = entry.Trim().Split(':', 2);
+                var kind = pair[0].ToLowerInvariant();
+                if (pair.Length == 2 && kind is "domain" or "full" or "geosite")
+                    domains.Add(kind + ":" + (kind == "geosite" ? pair[1].Trim().ToLowerInvariant() : RuleEngine.Domain(pair[1].Trim())));
+            }
+        }
+        return domains.ToArray();
+    }
+
+    public string[]? HealthResolvers(string exitId) =>
+        ManagedDohResolvers != null && Exits.Any(e => e.Id == exitId && e.Direct)
+            ? BootstrapDohResolvers ?? DohResolvers.Domestic : null;
+
+    public bool SameDns(RelayPlan other) =>
+        (ManagedDohResolvers == null && other.ManagedDohResolvers == null) ||
+        ManagedDohResolvers != null && other.ManagedDohResolvers != null &&
+        ManagedDohResolvers.SequenceEqual(other.ManagedDohResolvers) &&
+        (BootstrapDohResolvers ?? DohResolvers.Domestic).SequenceEqual(other.BootstrapDohResolvers ?? DohResolvers.Domestic);
+}
 public sealed record LinkSample(string Id, bool Direct, bool Healthy, double BaselineMs, double LatencyMs,
     double FailureRate, double BytesPerSecond, int Active, double Recovery, long Assigned,
     double? UploadBytesPerSecond = null, double? DownloadBytesPerSecond = null)
@@ -125,6 +204,10 @@ public sealed record RelaySnapshot(DateTimeOffset Time, long Sequence, LinkSampl
 {
     public bool SupportsDefaultRoute { get; init; }
     public bool SupportsExitFailover { get; init; }
+    public bool SupportsEncryptedDnsRouting { get; init; }
+    public bool SupportsDnsFailurePolicy { get; init; }
+    public bool SupportsManagedDoh { get; init; }
+    public bool SupportsSplitDoh { get; init; }
     public string? AutoError => Links.Any(l => !l.Direct && l.Healthy) ? null : "自动分摊没有健康上游。";
 }
 public sealed record Decision(string Rule, string Group, RouteAction Action, string? Exit, string[] Candidates, string? Error)
@@ -190,15 +273,15 @@ public sealed class RuleEngine
         }
     }
 
-    public Decision Select(string target, RelaySnapshot snapshot)
+    public Decision Select(string target, RelaySnapshot snapshot, bool healthyDns = false)
     {
         target = target.Trim();
         if (!IPAddress.TryParse(target, out var ip)) target = Domain(target);
         else target = ip.ToString();
-        var entry = entries.FirstOrDefault(e => e.Tests.Any(match => match(target, ip)));
-        var rule = entry?.Rule ?? defaultRule;
+        var entry = healthyDns ? null : entries.FirstOrDefault(e => e.Tests.Any(match => match(target, ip)));
+        var rule = healthyDns ? null : entry?.Rule ?? defaultRule;
         var action = rule?.Action ?? RouteAction.Auto;
-        string name=entry?.Rule.Name??"默认规则", group=entry?.Group??"—";
+        string name = healthyDns ? "加密 DNS" : entry?.Rule.Name ?? "默认规则", group = entry?.Group ?? "—";
         Decision Resolve(RouteAction via, string? exit)
         {
             if (via==RouteAction.Auto) {

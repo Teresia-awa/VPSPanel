@@ -41,7 +41,13 @@ finish() {
         [ "$made_r" = 0 ] || rm -f -- "$units/$r"
         systemctl daemon-reload
         if [ "$old_x" = 1 ]; then systemctl start "$x" || { report rollback-error; exit 1; }; fi
-        if [ "$old_r" = 1 ]; then systemctl start "$r" || { report rollback-error; exit 1; }; fi
+        if [ "$old_r" = 1 ]; then
+            systemctl start "$r" || { report rollback-error; exit 1; }
+            # Type=exec only confirms execve. Wait until the restored data plane accepts a request.
+            if [ "$switched" = 1 ] && [ "$old_x" = 1 ]; then
+                timeout 115 "$live/relay" restore-check "$live" >/dev/null 2>&1 || { report rollback-error; exit 1; }
+            fi
+        fi
         rm -f -- "$base/pending"
         report "rejected-$phase"
     fi
@@ -100,7 +106,7 @@ UNIT
 cat > "$stage/$r" <<'UNIT'
 [Unit]
 Description=VPSPanel restored Relay
-Requires=vpspanel-restored-xray.service
+Wants=vpspanel-restored-xray.service
 After=vpspanel-restored-xray.service
 [Service]
 Type=exec

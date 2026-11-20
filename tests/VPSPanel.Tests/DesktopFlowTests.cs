@@ -8,6 +8,21 @@ namespace VPSPanel.Tests;
 
 public sealed class DesktopFlowTests
 {
+    private static void Capture(Window window, string page, bool dark)
+    {
+        var output = Environment.GetEnvironmentVariable("VPSPANEL_VISUAL_DIR");
+        if (string.IsNullOrWhiteSpace(output)) return;
+        Directory.CreateDirectory(output);
+        var content = (FrameworkElement)window.Content;
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(
+            (int)content.ActualWidth, (int)content.ActualHeight, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+        bitmap.Render(content);
+        var png = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var file = File.Create(Path.Combine(output, page + (dark ? "-dark.png" : "-light.png")));
+        png.Save(file);
+    }
+
     [IsolatedSshFact]
     public async Task WindowReadsFixtureAndEditsLocalDraft()
     {
@@ -96,10 +111,30 @@ public sealed class DesktopFlowTests
                     demo.HomePage.SnapshotTabs.SelectedIndex=2;
                     demo.RulesPage.Target.Text="unlisted.example";
                     Assert.Contains("健康候选：A、B",demo.RulesPage.Preview.Text);
+                    var dnsDirectory = Directory.CreateDirectory(Path.Combine(directory.FullName,"dns-fixture"));
+                    var dnsHost = demoSession.Current! with { Target=new SshTarget("phase2-lab",Service:"phase2-lab"), Direct=null, ManagedRevision="fixture" };
+                    var fixtureBook = new ConnectionBook(1,"fixture",new() { ["fixture"]=dnsHost });
+                    File.WriteAllBytes(Path.Combine(dnsDirectory.FullName,"connections.dpapi"),System.Security.Cryptography.ProtectedData.Protect(
+                        System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fixtureBook),null,System.Security.Cryptography.DataProtectionScope.CurrentUser));
+                    var dnsSession = new PanelSession(dnsDirectory.FullName,t=>new OpenSsh(t,config));
+                    var dns = new MainWindow(dnsSession){Left=-20000,Top=-20000,WindowStartupLocation=WindowStartupLocation.Manual,ShowActivated=false};
+                    dns.Show();
+                    dns.Nav.SelectedIndex=4;
                     foreach(var dark in new[]{false,true}){
 #pragma warning disable WPF0001
                         app.ThemeMode=dark?ThemeMode.Dark:ThemeMode.Light;
 #pragma warning restore WPF0001
+                        dns.DnsResolverMode.SelectedValue="Existing";
+                        Assert.Equal(Visibility.Collapsed,dns.DohEditor.Visibility);
+                        dns.DnsResolverMode.SelectedValue="Managed";
+                        Assert.Equal(Visibility.Visible,dns.DohEditor.Visibility);
+                        dns.SettingsPage.ScrollToEnd();
+                        await dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);
+                        dns.UpdateLayout();
+                        Assert.True(dns.DohAddresses.ActualWidth>120 && dns.BootstrapAddresses.ActualWidth>120);
+                        Click(Descendants<Button>(dns.DohEditor).Single(b=>Equals(b.Content,"海外中转")));
+                        Assert.Equal(string.Join(Environment.NewLine,DohResolvers.Overseas),dns.BootstrapAddresses.Text);
+                        Capture(dns, "dns", dark);
                         for(int pageIndex=0;pageIndex<=2;pageIndex+=2){
                             demo.Nav.SelectedIndex=pageIndex;
                             await dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);
@@ -123,17 +158,19 @@ public sealed class DesktopFlowTests
                             demo.UpdateLayout();
                             Assert.True(((DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(grid.SelectedIndex)).IsSelected);
                             grid.UnselectAll();demo.UpdateLayout();
-                            var output=Environment.GetEnvironmentVariable("VPSPANEL_VISUAL_DIR");
-                            if(!string.IsNullOrWhiteSpace(output)){
-                                Directory.CreateDirectory(output);
-                                var client=(FrameworkElement)demo.Content;
-                                var bmp=new System.Windows.Media.Imaging.RenderTargetBitmap((int)client.ActualWidth,(int)client.ActualHeight,96,96,System.Windows.Media.PixelFormats.Pbgra32);
-                                bmp.Render(client);var png=new System.Windows.Media.Imaging.PngBitmapEncoder();
-                                png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));
-                                using var file=File.Create(Path.Combine(output,(pageIndex==0?"home":"rules")+(dark?"-dark":"-light")+".png"));png.Save(file);
-                            }
+                            Capture(demo, pageIndex == 0 ? "home" : "rules", dark);
+                        }
+                        foreach (var (index, name) in new[] { (1, "exits"), (3, "migration") })
+                        {
+                            demo.Nav.SelectedIndex = index;
+                            await dispatcher.InvokeAsync(() => {}, DispatcherPriority.ApplicationIdle);
+                            demo.UpdateLayout();
+                            Capture(demo, name, dark);
                         }
                     }
+                    demo.Nav.SelectedIndex=2;
+                    demo.UpdateLayout();
+                    dns.Close();
                     var rulesPage=demo.RulesPage;
                     var choices=rulesPage.DefaultRoute;
                     Assert.Equal(2+demoSession.Current!.Workspace.Items.Count(),choices.Items.Count);

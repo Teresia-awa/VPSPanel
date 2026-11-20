@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -7,7 +8,10 @@ namespace VPSPanel.Relay;
 
 internal sealed class RelayServer(RoutingRuntime runtime)
 {
-    public async Task Serve(TcpListener listener, CancellationToken token)
+    public Task Serve(TcpListener listener, CancellationToken token, bool healthyDns = false) =>
+        Serve(listener, token, (client, ct) => Handle(client, ct, healthyDns));
+
+    private static async Task Serve(TcpListener listener, CancellationToken token, Func<TcpClient, CancellationToken, Task> handle)
     {
         var workers = new ConcurrentDictionary<long, Task>();
         long next = 0;
@@ -17,7 +21,7 @@ internal sealed class RelayServer(RoutingRuntime runtime)
             {
                 var tcp = await listener.AcceptTcpClientAsync(token); tcp.NoDelay = true;
                 long key = ++next;
-                var work = Handle(tcp, token); workers[key] = work;
+                var work = handle(tcp, token); workers[key] = work;
                 _ = work.ContinueWith(t => workers.TryRemove(key, out var _), TaskScheduler.Default);
             }
         }
@@ -25,7 +29,7 @@ internal sealed class RelayServer(RoutingRuntime runtime)
     }
     private static Task Reply(Stream s, byte code, int port, CancellationToken ct) =>
         s.WriteAsync(new byte[] { 5, code, 0, 1, 127, 0, 0, 1, (byte)(port >> 8), (byte)port }, ct).AsTask();
-    private async Task Handle(TcpClient client, CancellationToken token)
+    private async Task Handle(TcpClient client, CancellationToken token, bool healthyDns)
     {
         using (client)
         using (var init = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -43,14 +47,14 @@ internal sealed class RelayServer(RoutingRuntime runtime)
                 var request = await Socks.Read(stream, 3, init.Token);
                 if (request[0] != 5 || request[2] != 0) return;
                 var dest = await Socks.Address(stream, init.Token); pending = true;
-                if (request[1] == 3)
+                if (request[1] == 3 && !healthyDns)
                 {
                     using var incoming = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
                     await Reply(stream, 0, ((IPEndPoint)incoming.Client.LocalEndPoint!).Port, init.Token); pending = false;
                     await Associate(stream, incoming, dest, token); return;
                 }
                 if (request[1] != 1) { await Reply(stream, 7, 0, init.Token); return; }
-                using var lease = runtime.Open(dest.Host, false, token);
+                using var lease = runtime.Open(dest.Host, false, token, healthyDns);
                 var ct = lease.Stop.Token;
                 TcpClient upstream;
                 try { (upstream, _) = await Socks.Connect(lease.Line.Lane.Port, 1, dest, ct); }

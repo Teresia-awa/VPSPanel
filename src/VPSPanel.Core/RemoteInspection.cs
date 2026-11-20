@@ -66,7 +66,16 @@ public sealed class RemoteInspection(ISshTransport ssh)
         trap 'exit 1' HUP INT TERM
         sock="$dir/probe.sock"
         candidate=$(cat)
-        if ! getent ahosts "$2" >/dev/null; then printf 'DNS_FAIL\n'; exit 0; fi
+        mode=$7
+        if [ -f /var/lib/vpspanel/committed.json ]; then
+            active=$(python3 -c 'import json; print("managed" if json.load(open("/var/lib/vpspanel/committed.json"))["Plan"].get("ManagedDohResolvers") is not None else "existing")') || exit 1
+            if [ "$active" = managed ]; then mode=managed; fi
+        fi
+        if [ "$mode" = managed ]; then
+            if ! candidate=$(printf '%s' "$candidate" | /var/lib/vpspanel/relay prepare-probe /var/lib/vpspanel 2>/dev/null) || [ "$candidate" = existing ]; then
+                printf 'DNS_FAIL\n'; exit 0
+            fi
+        elif ! getent ahosts "$2" >/dev/null; then printf 'DNS_FAIL\n'; exit 0; fi
         printf 'DNS_OK\n'
         destination=$3
         port=$4
@@ -82,7 +91,7 @@ public sealed class RemoteInspection(ISshTransport ssh)
         curl -q --noproxy '*' --unix-socket "$sock" --proto '=https' --connect-timeout 8 --max-time 12 --silent --output /dev/null --write-out 'TLS=%{time_appconnect}\nHTTP=%{http_code}\nTOTAL=%{time_total}\n' "$5" || true
         if [ -f "$dir/connected" ]; then printf 'UPSTREAM_OK\n'; fi
         """;
-    public async Task<ProbeResult> Probe(string binary, string workingDirectory, ExitProfile exit, CancellationToken token, Uri? checkUrl = null)
+    public async Task<ProbeResult> Probe(string binary, string workingDirectory, ExitProfile exit, CancellationToken token, Uri? checkUrl = null, bool managedDns = false)
     {
         exit.Validate();
         var url = checkUrl ?? new Uri("https://www.gstatic.com/generate_204");
@@ -90,7 +99,7 @@ public sealed class RemoteInspection(ISshTransport ssh)
             || url.Scheme != "https" || !ExitProfile.ValidHost(url.IdnHost) || url.UserInfo.Length > 0)
             throw new PanelException("预检目标或内核路径无效。");
         var script = Convert.ToBase64String(Encoding.UTF8.GetBytes(ProbeShell.ReplaceLineEndings("\n")));
-        var command = "timeout -k 3 32 sh -c \"$(printf %s " + script + " | base64 -d)\" probe " + string.Join(" ", new[] { binary, exit.Host, url.IdnHost, url.Port.ToString(), url.AbsoluteUri, workingDirectory }.Select(OpenSsh.Quote));
+        var command = "timeout -k 3 32 sh -c \"$(printf %s " + script + " | base64 -d)\" probe " + string.Join(" ", new[] { binary, exit.Host, url.IdnHost, url.Port.ToString(), url.AbsoluteUri, workingDirectory, managedDns ? "managed" : "existing" }.Select(OpenSsh.Quote));
         var outbound = exit.ToOutbound();
         if (outbound["streamSettings"]?["tlsSettings"] is JsonObject tlsOptions) tlsOptions.Remove("masterKeyLog");
         if (outbound["streamSettings"]?["realitySettings"] is JsonObject realityOptions) realityOptions.Remove("masterKeyLog");

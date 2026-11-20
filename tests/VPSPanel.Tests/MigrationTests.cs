@@ -122,6 +122,75 @@ public sealed class MigrationTests
             Assert.Equal(previous,await targetSsh.Command("readlink -f /var/lib/vpspanel","",default));
             await targetSsh.Command("systemctl is-active --quiet vpspanel-restored-xray vpspanel-restored-relay && /var/lib/vpspanel/relay restore-check /var/lib/vpspanel","",default);
             await ExercisePublication(targetSsh,cfg,folder.FullName);
+            var activeTarget = new SshTarget("phase4-target",Service:"xray-relay");
+            var dnsDesk = new PanelSession(Path.Combine(folder.FullName,"split-source"),t=>new OpenSsh(t,cfg));
+            await dnsDesk.ReadOnly(activeTarget,default);
+            string[] proxy = ["https://192.0.2.53:24453/dns-query"];
+            string[] direct = ["https+local://192.0.2.53:24453/dns-query"];
+            dnsDesk.SaveDohResolvers(proxy,direct);
+            var splitPack = Path.Combine(folder.FullName,"split.vpspack");
+            await dnsDesk.ExportRecovery(splitPack,secret,secret,assets,"entry.example",default);
+            var split = RecoveryPackage.Open(splitPack,secret,"plan.json");
+            Assert.Equal(direct,split.Json<RelayPlan>("plan.json").BootstrapDohResolvers);
+            // This SSH alias is internal to the disposable systemd fixture. Preserve its prior generation.
+            await targetSsh.Command("sh -se","""
+                test "$(cat /etc/hostname)" = migration-fixture
+                systemctl stop vpspanel-relay xray-relay
+                mkdir /tmp/prior-panel
+                mv /var/lib/vpspanel /var/lib/vpspanel-releases /tmp/prior-panel/
+                mv /etc/systemd/system/vpspanel-restored-xray.service /etc/systemd/system/vpspanel-restored-relay.service /tmp/prior-panel/
+                systemctl daemon-reload
+                test ! -e /var/lib/vpspanel
+                test ! -e /var/lib/vpspanel-releases
+                """.ReplaceLineEndings("\n")+"\n",default);
+            var fresh = new PanelSession(Path.Combine(folder.FullName,"split-clean"),t=>new OpenSsh(t,cfg));
+            await fresh.RestoreRecovery(splitPack,secret,targetAlias,null,"192.0.2.20",default);
+            await fresh.ReadOnly(targetAlias,default);
+            Assert.Equal(proxy,fresh.Current!.ManagedDohResolvers);
+            Assert.Equal(direct,fresh.Current.Bootstrap);
+            Assert.Empty((await fresh.PreviewProduction(default)).Changes);
+            var checkedNode = await fresh.Probe(fresh.Current.Workspace.Items.First(),default);
+            Assert.True(checkedNode.Result.Passed,checkedNode.Result.Detail);
+            const string relayPid = "systemctl show vpspanel-restored-relay -p MainPID --value";
+            var pid = await targetSsh.Command(relayPid,"",default);
+            fresh.SaveDohResolvers(null,null);
+            var disable = await fresh.PreviewProduction(default);
+            Assert.True(disable.RequiresXrayRestart);
+            Assert.Contains("已生效",await fresh.ApplyProduction(disable,default));
+            await fresh.ReadOnly(targetAlias,default);
+            Assert.Null(fresh.Current!.ManagedDohResolvers);
+            await targetSsh.Command("sh -se","""
+                test "$(cat /etc/hostname)" = migration-fixture
+                install -d -m 0755 /var/lib/vpspanel/dns-assets /etc/systemd/system/vpspanel-restored-xray.service.d
+                cp /var/lib/vpspanel/geoip.dat /var/lib/vpspanel/geosite.dat /var/lib/vpspanel/dns-assets/
+                printf '\170\001' >> /var/lib/vpspanel/dns-assets/geoip.dat
+                printf '%s\n' '[Service]' 'BindReadOnlyPaths=/var/lib/vpspanel/dns-assets:/run/vpspanel-dns' 'Environment=XRAY_LOCATION_ASSET=/run/vpspanel-dns' > /etc/systemd/system/vpspanel-restored-xray.service.d/80-dns.conf
+                systemctl daemon-reload
+                """.ReplaceLineEndings("\n")+"\n",default);
+            fresh.SaveDohResolvers(proxy,direct);
+            var enable = await fresh.PreviewProduction(default);
+            Assert.True(enable.RequiresXrayRestart);
+            Assert.Contains("已生效",await fresh.ApplyProduction(enable,default));
+            Assert.Equal(pid,await targetSsh.Command(relayPid,"",default));
+            var reexport=Path.Combine(folder.FullName,"mounted-geo.vpspack");
+            await fresh.ExportRecovery(reexport,secret,secret,assets,"entry.example",default);
+            var recovered=RecoveryPackage.Open(reexport,secret,"geoip.dat");
+            var actual=await targetSsh.Command("sha256sum /var/lib/vpspanel/dns-assets/geoip.dat","",default);
+            Assert.Equal(actual.Split(' ')[0],Convert.ToHexStringLower(SHA256.HashData(recovered.Files["geoip.dat"])));
+            var accessCheck=await targetSsh.Command("sh -se","""
+                mkdir -p /run/systemd/system
+                cat > /run/systemd/system/vpspanel-asset-check.service <<'UNIT'
+                [Service]
+                Type=oneshot
+                RemainAfterExit=yes
+                DynamicUser=yes
+                BindReadOnlyPaths=/var/lib/vpspanel/dns-assets:/run/vpspanel-dns
+                ExecStart=/bin/sh -ec 'test "$$(id -u)" != 0 || exit 81; test -r /run/vpspanel-dns/vpspanel-bootstrap.dat || exit 82; test ! -r /var/lib/vpspanel/committed.json || exit 83'
+                UNIT
+                systemctl daemon-reload
+                if systemctl start vpspanel-asset-check; then echo verified; else systemctl show vpspanel-asset-check -p ExecMainStatus -p Result; fi
+                """.ReplaceLineEndings("\n")+"\n",default);
+            Assert.Equal("verified",accessCheck.Trim());
         }finally{folder.Delete(true);}
     }
 
@@ -131,7 +200,7 @@ public sealed class MigrationTests
         await ssh.Command("sh -se", """
             systemctl stop vpspanel-restored-relay vpspanel-restored-xray
             mkdir -p /etc/xray-relay /etc/systemd/system/xray-relay.service.d
-            cp /var/lib/vpspanel/source.json /etc/xray-relay/config.json
+            cp /var/lib/vpspanel/portable.json /etc/xray-relay/config.json
             cat >/etc/systemd/system/xray-relay.service <<'UNIT'
             [Service]
             LoadCredential=config.json:/etc/xray-relay/config.json

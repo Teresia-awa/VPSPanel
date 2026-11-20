@@ -14,10 +14,11 @@ $relay=Join-Path $root "publish/relay/$Runtime/VPSPanel.Relay"
 $version=& wsl -d $Distribution -- (LinuxPath $Xray) version
 if($LASTEXITCODE -or $version[0] -notmatch '^Xray 26\.10\.31 '){throw 'Expected Xray 26.10.31.'}
 $v=& wsl -d $Distribution -- (LinuxPath $relay) version
-if($LASTEXITCODE -or $v -ne 'VPSPanel.Relay 1.4.0'){throw 'Relay version mismatch.'}
+if($LASTEXITCODE -or $v -ne 'VPSPanel.Relay 1.5.0'){throw 'Relay version mismatch.'}
 $features=& wsl -d $Distribution -- (LinuxPath $relay) capabilities
 if($LASTEXITCODE -or $features -notcontains 'configurable-default'){throw 'Relay lacks configurable default routing.'}
 if($features -notcontains 'exit-failover'){throw 'Relay lacks exit failover support.'}
+if($features -notcontains 'split-doh'){throw 'Relay lacks managed DoH configuration.'}
 [void][IO.Directory]::CreateDirectory($Destination)
 $items=@{'xray'=$Xray;'relay'=$relay;'geoip.dat'=(Join-Path $GeoDirectory geoip.dat);'geosite.dat'=(Join-Path $GeoDirectory geosite.dat)}
 $hashes=@{}
@@ -30,5 +31,7 @@ foreach($name in $items.Keys){
 }
 $hashes['relay-configurable-default']=$hashes['relay']
 $hashes['relay-exit-failover']=$hashes['relay']
+$hashes['relay-managed-doh']=$hashes['relay']
+$hashes['relay-split-doh']=$hashes['relay']
 [IO.File]::WriteAllText((Join-Path $Destination assets.json),($hashes|ConvertTo-Json))
 Write-Output 'Offline recovery assets verified.'

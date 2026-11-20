@@ -8,7 +8,7 @@ public sealed record UnitInspection(string Fragment,string DropIns,string Kind,s
 
 public sealed partial class PanelSession
 {
-    public async Task<UnitInspection> InspectService(CancellationToken token,string tunnelTag="",int tunnelPort=0,string companionTag="")
+    public async Task<UnitInspection> InspectService(CancellationToken token)
     {
         var host=Current??throw new PanelException("请先选择已读取的主机。");
         if(IsDemo)throw new PanelException("离线演示没有活动的 systemd 单元。");
@@ -16,7 +16,7 @@ public sealed partial class PanelSession
         // Never request SetCredential, Environment or the full unit text: they may contain inline secrets.
         const string script="""
             import os,sys,subprocess,json
-            unit,path,tunnel,port,companion=sys.argv[1:]
+            unit,path=sys.argv[1:]
             def prop(key):
                 return subprocess.check_output(["systemctl","show","-p",key,"--value",unit],text=True).strip()
             pid=int(prop("MainPID"))
@@ -68,7 +68,12 @@ public sealed partial class PanelSession
                         if kind=="LoadCredential" and source and os.path.isfile(source):equal=raw==open(source,"rb").read()
             else:source=os.path.realpath(path);equal=True
             ins=cfg.get("inbounds",[]); rules=cfg.get("routing",{}).get("rules",[])
+            user_tags={i.get("tag") for i in ins if i.get("protocol")=="vless" and i.get("streamSettings",{}).get("security")=="reality"}
+            infra={i["tag"] for i in ins if i.get("tag") and i["tag"] not in user_tags}
+            outs={o.get("tag") for o in cfg.get("outbounds",[])}
             first=rules[0] if rules else {}
+            forwarding=any(infra.intersection(rule.get("inboundTag",[])) and not user_tags.intersection(rule.get("inboundTag",[]))
+                           and rule.get("outboundTag") in outs for rule in rules)
             print(json.dumps(dict(Fragment=prop("FragmentPath"),DropIns=prop("DropInPaths"),Kind=kind,Source=source,
                 ContentMatches=equal,UserInputs=sum(i.get("protocol")=="vless" for i in ins),
                 InfrastructureInputs=sum(i.get("protocol") in ("dokodemo-door","tunnel") for i in ins),
@@ -76,10 +81,10 @@ public sealed partial class PanelSession
                 [o.get("tag") for o in cfg.get("outbounds",[])],
                 FirstRuleExcludesUserInputs=bool(first.get("inboundTag")) and not any(i.get("tag") in first["inboundTag"] for i in ins if i.get("protocol")=="vless"),
                 FirstRuleUsesTunnel=any(i.get("tag") in first.get("inboundTag",[]) for i in ins if i.get("protocol") in ("dokodemo-door","tunnel")),
-                ExpectedForwarding=bool(tunnel) and set(first.get("inboundTag",[]))=={tunnel,companion} and any(i.get("tag")==tunnel and str(i.get("port"))==port and i.get("protocol") in ("dokodemo-door","tunnel") for i in ins))))
+                ExpectedForwarding=forwarding)))
             """;
         var transport=RelayTransport(host);
-        var result=await Task.Run(()=>transport.Command("python3 - "+string.Join(" ",new[]{host.Target.Service,host.ConfigPath,tunnelTag,tunnelPort.ToString(),companionTag}.Select(OpenSsh.Quote)),
+        var result=await Task.Run(()=>transport.Command("python3 - "+string.Join(" ",new[]{host.Target.Service,host.ConfigPath}.Select(OpenSsh.Quote)),
             script.ReplaceLineEndings("\n"),token),token);
         return JsonSerializer.Deserialize<UnitInspection>(result)??throw new PanelException("只读核查返回无效。");
     }

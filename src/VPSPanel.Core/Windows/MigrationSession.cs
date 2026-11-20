@@ -91,18 +91,24 @@ public sealed partial class PanelSession
             env=dict(x.split(b"=",1) for x in open("/proc/%d/environ"%pid,"rb").read().split(b"\0") if b"=" in x)
             binary=os.readlink("/proc/%d/exe"%pid)
             first=os.fsdecode(env.get(b"xray.location.asset",env.get(b"XRAY_LOCATION_ASSET",os.fsencode(os.path.dirname(binary)))))
-            paths={"xray":binary}
+            proc="/proc/%d"%pid
+            paths={"xray":proc+"/exe"}
             for name in ("geoip.dat","geosite.dat"):
                 for parent in (first,"/usr/local/share/xray","/usr/share/xray","/opt/share/xray"):
-                    path=os.path.join(os.readlink("/proc/%d/cwd"%pid),parent,name)
+                    # Resolve paths through Xray's mount namespace, including private systemd bind mounts.
+                    base=os.path.join(proc,"root",parent.lstrip("/")) if os.path.isabs(parent) else os.path.join(proc,"cwd",parent)
+                    path=os.path.join(base,name)
                     if os.path.isfile(path): paths[name]=path;break
-            if sys.argv[1]=="vpspanel-restored-xray":
+            if sys.argv[2]=="managed":
+                base="/var/lib/vpspanel/rules-geo"
+                if not os.path.isdir(base):base="/var/lib/vpspanel"
                 for name in ("geoip.dat","geosite.dat"):
-                    path="/var/lib/vpspanel/rules-geo/"+name
+                    path=os.path.join(base,name)
                     if os.path.isfile(path):paths["relay-"+name]=path
             print(json.dumps(paths))
             """;
-        return JsonSerializer.Deserialize<Dictionary<string,string>>(await transport.Command("python3 - "+OpenSsh.Quote(host.Target.Service),lookup.ReplaceLineEndings("\n"),ct))??throw new InvalidDataException();
+        return JsonSerializer.Deserialize<Dictionary<string,string>>(await transport.Command("python3 - "+OpenSsh.Quote(host.Target.Service)+
+            (host.ManagedRevision!=null || host.Target.Service=="vpspanel-restored-xray" ? " managed" : " original"),lookup.ReplaceLineEndings("\n"),ct))??throw new InvalidDataException();
     }
     public async Task<PackageManifest> ExportRecovery(string path,string password,string confirmation,string assets,string clientHost,CancellationToken ct,
         string? checkUrl=null,IProgress<string>? progress=null)
@@ -120,9 +126,19 @@ public sealed partial class PanelSession
                 raw=(await transport.ReadConfiguration("/var/lib/vpspanel/source.json",ct)).Json;
                 portableRaw=(await transport.ReadConfiguration("/var/lib/vpspanel/portable.json",ct)).Json;
             }else if(h.ManagedRevision!=null){
-                var state=await PublicationRemote.Inspect(transport,h.Target,ct);
+                var state=await PublicationRemote.Inspect(transport,h.Target,ct,includeDnsSource:plan.ManagedDohResolvers!=null);
                 if(state.Revision!=h.ManagedRevision)throw new PanelException("部署方案已变化，请重新读取主机再导出。");
                 raw=portableRaw=(await transport.ReadConfiguration(state.Source,ct)).Json;
+                if(plan.ManagedDohResolvers!=null && state.SupportsManagedDoh){
+                    var source=RecoveryLayout.Parse(portableRaw);
+                    if(state.OriginalDns is null)source.Remove("dns");
+                    else source["dns"]=state.OriginalDns.DeepClone();
+                    if(state.UsesBootstrapAsset == true){
+                        if(state.OriginalGeodata is null)source.Remove("geodata");
+                        else source["geodata"]=state.OriginalGeodata.DeepClone();
+                    }
+                    portableRaw=source.ToJsonString();
+                }
             }else{
                 var live=await new RemoteInspection(transport).Read(h.Target,ct);
                 if(live.Version!=RecoveryPackage.KernelVersion || live.Snapshot.Digest!=h.Workspace.Snapshot?.Digest)
@@ -147,6 +163,10 @@ public sealed partial class PanelSession
             if(plan.Policy.OnUnavailable.Action!=FailureAction.Reject && (!hashes.TryGetValue("relay-exit-failover",out var failoverHash) ||
                 !hashes.TryGetValue("relay",out var bundledHash) || !string.Equals(failoverHash,bundledHash,StringComparison.OrdinalIgnoreCase)))
                 throw new MaterialException("此故障策略需要支持出口故障切换的 Relay，请选择新版离线安装材料。");
+            bool splitCapable = hashes.TryGetValue("relay-split-doh",out var dnsHash) &&
+                hashes.TryGetValue("relay",out var dnsRelayHash) && string.Equals(dnsHash,dnsRelayHash,StringComparison.OrdinalIgnoreCase);
+            if(plan.ManagedDohResolvers!=null && !splitCapable)
+                throw new MaterialException("此 DoH 配置需要新版 Relay，请选择更新的离线安装材料。");
             var sourceFiles=transport==null?new Dictionary<string,string>():await SourceAssets(transport,h,ct);
             if(portableRaw.Contains("\"ext:",StringComparison.OrdinalIgnoreCase)||portableRaw.Contains("\"ext-ip:",StringComparison.OrdinalIgnoreCase))
                 throw new PanelException("源配置引用了自定义外部 Geo 文件，请先将该依赖纳入迁移清单。");
@@ -181,7 +201,7 @@ public sealed partial class PanelSession
             if(h.Version!=RecoveryPackage.KernelVersion)throw new PanelException("源主机 Xray 版本与恢复工具不兼容。");
             ct.ThrowIfCancellationRequested();
             progress?.Report("正在加密并重新打开恢复包，逐项核对摘要…");
-            var result=await Task.Run(()=>RecoveryPackage.Export(path,password,confirmation,items),ct);
+            var result=await Task.Run(()=>RecoveryPackage.Export(path,password,confirmation,items,splitCapable?RecoveryPackage.RelayVersion:RecoveryPackage.LegacyRelayVersion),ct);
             Record("导出","认证及全部文件摘要通过");return result;
         }catch(MaterialException ex){Record("导出",ex.Message);throw;}
         catch{Record("导出","未完成");throw;}
@@ -193,8 +213,18 @@ public sealed partial class PanelSession
         // Authentication and the complete member hash pass happen before creating any SSH connection.
         using var locked=File.Open(package,FileMode.Open,FileAccess.Read,FileShare.Read);
         OpenPackage restored;
-        try{restored=await Task.Run(()=>RecoveryPackage.Open(package,password,"relay","panel.json","portable.json","relay-geoip.dat","relay-geosite.dat"),token);}
+        try{restored=await Task.Run(()=>RecoveryPackage.Open(package,password,"relay","plan.json","panel.json","portable.json","relay-geoip.dat","relay-geosite.dat"),token);}
         catch(PanelException){Record("恢复","恢复包认证或完整性校验失败");throw;}
+        var plan=restored.Json<RelayPlan>("plan.json");
+        if(plan.BootstrapDohResolvers!=null)
+        {
+            if(restored.Manifest.RelayVersion!=RecoveryPackage.RelayVersion || plan.ManagedDohResolvers==null ||
+                !plan.FollowHealthyDns || plan.DnsOnFailure!=DnsFailureAction.Reject)
+                throw new PanelException("恢复包的双栏 DoH 配置与 Relay 版本不匹配。");
+            _=DohResolvers.Validate(plan.ManagedDohResolvers);
+            _=DohResolvers.Validate(plan.BootstrapDohResolvers,true);
+            _=plan.BootstrapDomains();
+        }
         var profile=restored.Json<MigrationProfile>("panel.json");
         var clients=RecoveryLayout.Clients(RecoveryLayout.Parse(Encoding.UTF8.GetString(restored.Files["portable.json"])));
         if(!ExitProfile.ValidHost(newAddress))throw new PanelException("请填写新主机对客户端公开的地址。");
@@ -228,7 +258,7 @@ public sealed partial class PanelSession
             await uploader.Upload(package,stage+"/backup",token);
             await uploader.Upload(bootstrap,stage+"/relay",token);
             var relayHash=restored.Manifest.Files.Single(f=>f.Name=="relay").Sha256.ToLowerInvariant();
-            string cmd=$"cd {stage} && umask 077 && echo '{relayHash}  relay' | sha256sum -c --status && chmod 700 relay && test \"$(./relay version)\" = 'VPSPanel.Relay {RecoveryPackage.RelayVersion}' && mkdir -m 700 release && ./relay restore-unpack backup release";
+            string cmd=$"cd {stage} && umask 077 && echo '{relayHash}  relay' | sha256sum -c --status && chmod 700 relay && test \"$(./relay version)\" = 'VPSPanel.Relay {restored.Manifest.RelayVersion}' && mkdir -m 700 release && ./relay restore-unpack backup release";
             progress?.Report("传输完成，正在校验、解包和静态检查候选配置…");
             await transport.Command(cmd,password,token);
             await using var resource=typeof(PanelSession).Assembly.GetManifestResourceStream("VPSPanel.install.sh")!;
@@ -256,7 +286,8 @@ public sealed partial class PanelSession
             var geoSet=Guid.NewGuid();string geo=Path.Combine(directory,"geo",geoSet.ToString("N"));Directory.CreateDirectory(geo);
             foreach(var name in new[]{"geoip.dat","geosite.dat"})File.WriteAllBytes(Path.Combine(geo,name),restored.Files["relay-"+name]);
             Write(key,new(dst,restored.Manifest.XrayVersion,"/var/lib/vpspanel/xray","/var/lib/vpspanel/xray.json",DateTimeOffset.Now,true,
-                profile.Workspace,"/var/lib/vpspanel",direct?.Profile,profile.Policy,profile.Total,geoSet));
+                profile.Workspace,"/var/lib/vpspanel",direct?.Profile,profile.Policy,profile.Total,geoSet,
+                CheckUrl:profile.CheckUrl,DeployedFollowHealthyDns:plan.FollowHealthyDns,DeployedDohResolvers:plan.ManagedDohResolvers,DeployedBootstrap:plan.BootstrapDohResolvers));
             activeLogin=direct==null?null:(dst,direct);
             Changed?.Invoke();
             Record("恢复","入口、启用出口及服务已验证");

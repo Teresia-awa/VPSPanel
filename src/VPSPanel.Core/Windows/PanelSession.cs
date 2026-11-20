@@ -3,12 +3,20 @@ using System.Text.Json;
 
 namespace VPSPanel.Core;
 
+public sealed record DohDraft(string[]? Resolvers, string[]? Bootstrap = null);
 public sealed record ObservedTopology(PortSummary[] Inbounds,ExitSummary[] Outbounds,RouteGroup[] Rules);
 public sealed record ManagedHost(SshTarget Target, string Version, string Binary, string ConfigPath,
     DateTimeOffset ReadAt, bool Sftp, ExitWorkspace Workspace, string WorkingDirectory, DirectProfile? Direct = null, RoutingPolicy? Rules = null, Bandwidth? Total = null, Guid? GeoSet = null,
     string? ManagedRevision = null, string? CheckUrl = null, PublicationTicket? Publication = null, Bandwidth? DeployedTotal = null,
-    ObservedTopology? LastReadTopology = null)
+    ObservedTopology? LastReadTopology = null, bool? FollowHealthyDnsDraft = null, bool DeployedFollowHealthyDns = false,
+    DnsFailureAction? DnsOnFailureDraft = null, DnsFailureAction DeployedDnsOnFailure = DnsFailureAction.Reject,
+    DohDraft? DnsResolversDraft = null, string[]? DeployedDohResolvers = null, string? ServerDnsMode = null, string[]? DeployedBootstrap = null)
 {
+    [System.Text.Json.Serialization.JsonIgnore] public bool FollowHealthyDns => FollowHealthyDnsDraft ?? DeployedFollowHealthyDns;
+    [System.Text.Json.Serialization.JsonIgnore] public DnsFailureAction DnsOnFailure => DnsOnFailureDraft ?? DeployedDnsOnFailure;
+    [System.Text.Json.Serialization.JsonIgnore] public string[]? ManagedDohResolvers =>
+        DnsResolversDraft is null ? DeployedDohResolvers : DnsResolversDraft.Resolvers;
+    [System.Text.Json.Serialization.JsonIgnore] public string[]? Bootstrap => DnsResolversDraft is null ? DeployedBootstrap : DnsResolversDraft.Bootstrap;
     [System.Text.Json.Serialization.JsonIgnore] public RoutingPolicy Policy => Rules ?? Workspace.Snapshot?.ImportedPolicy ?? RoutingPolicy.Empty;
 }
 public sealed record ConnectionBook(int Revision, string? Selected, Dictionary<string, ManagedHost> Hosts);
@@ -103,7 +111,10 @@ public sealed partial class PanelSession(string directory, Func<SshTarget, OpenS
         if (direct?.Remember == true) access.SetSecret(target, direct.Secret);
         Write(key, new(target, read.Version, read.Binary, read.ConfigPath, DateTimeOffset.Now,
             read.Sftp, workspace.Refresh(logicalSnapshot), read.WorkingDirectory, direct?.Profile,rules,total,previous?.GeoSet,managed?.Revision,managed?.CheckUrl,previous?.Publication,managed?.Plan.Total,
-            managed==null?null:new(read.Snapshot.Inbounds,read.Snapshot.Outbounds,read.Snapshot.Rules)));
+            managed==null?null:new(read.Snapshot.Inbounds,read.Snapshot.Outbounds,read.Snapshot.Rules),
+            previous?.FollowHealthyDnsDraft,managed?.Plan.FollowHealthyDns??false,
+            previous?.DnsOnFailureDraft,managed?.Plan.DnsOnFailure??DnsFailureAction.Reject,
+            previous?.DnsResolversDraft,managed?.Plan.ManagedDohResolvers,managed?.ServerDnsMode,managed?.Plan.BootstrapDohResolvers));
         activeLogin = direct == null ? null : (target, direct);
         Changed?.Invoke();
     }
@@ -123,8 +134,15 @@ public sealed partial class PanelSession(string directory, Func<SshTarget, OpenS
         }
         var remote = Remote(host.Target, host.Direct == null ? null : login);
         if(checkUrl==null && host.CheckUrl!=null)checkUrl=new Uri(host.CheckUrl);
-        var result = host.Direct == null ? await remote.Probe(host.Binary, host.WorkingDirectory, candidate, token, checkUrl) :
-            await Task.Run(() => remote.Probe(host.Binary, host.WorkingDirectory, candidate, token, checkUrl), token);
+        bool managedDns = false;
+        if (host.ManagedRevision != null)
+        {
+            var deployed = await PublicationRemote.Inspect(RelayTransport(host),host.Target,token);
+            managedDns = deployed.Plan.ManagedDohResolvers != null;
+            if (managedDns && !deployed.SupportsSplitDoh) throw new PanelException("请升级 Relay 后再预检托管 DNS。");
+        }
+        var result = host.Direct == null ? await remote.Probe(host.Binary, host.WorkingDirectory, candidate, token, checkUrl, managedDns) :
+            await Task.Run(() => remote.Probe(host.Binary, host.WorkingDirectory, candidate, token, checkUrl, managedDns), token);
         return new CheckedExit(host, candidate, result);
     }
 
@@ -169,6 +187,26 @@ public sealed partial class PanelSession(string directory, Func<SshTarget, OpenS
         Changed?.Invoke();
     }
 
+    public void SaveDohResolvers(string[]? resolvers, string[]? bootstrap)
+    {
+        var host = Current;
+        if (IsDemo || host?.ManagedRevision == null) throw new PanelException("请先读取已接管的主机。");
+        if (resolvers != null)
+        {
+            resolvers = DohResolvers.Validate(resolvers);
+            bootstrap = DohResolvers.Validate(bootstrap ?? [], true);
+        }
+        else bootstrap = null;
+        Write(book.Selected!, host with
+        {
+            DnsResolversDraft = PlanChanges.Equal(resolvers, host.DeployedDohResolvers) && PlanChanges.Equal(bootstrap, host.DeployedBootstrap)
+                ? null : new(resolvers, bootstrap),
+            FollowHealthyDnsDraft = (resolvers != null) == host.DeployedFollowHealthyDns ? null : resolvers != null,
+            DnsOnFailureDraft = host.DeployedDnsOnFailure == DnsFailureAction.Reject ? null : DnsFailureAction.Reject
+        });
+        Changed?.Invoke();
+    }
+
     public PolicyUpdate RuleUpdate()
     {
         var h=Current ?? throw new PanelException("请先读取主机快照。");
@@ -199,12 +237,12 @@ public sealed partial class PanelSession(string directory, Func<SshTarget, OpenS
         var h=Current??throw new PanelException("先读取主机快照。");
         var snapshot=h.Workspace.Snapshot??throw new PanelException("缺少入口快照。");
         var exits=h.Workspace.Items.Select(e=>new RelayExit(e.Id,e.Name,false,e.Enabled,
-            new(e.Limited,(double)e.Up,(double)e.Down),e.ToOutbound())).ToList();
+            new(e.Limited,(double)e.Up,(double)e.Down),e.ToOutbound()) { Aliases=e.Aliases.Length==0 && h.ManagedDohResolvers==null?null:e.Aliases }).ToList();
         var direct=snapshot.Outbounds.Where(e=>e.Kind=="中转直连").ToArray();
         if(direct.Length>1)throw new PanelException("有多个直连出口，须先在接管时明确直连绑定。");
         if(direct.Length==1)exits.Add(new(direct[0].Tag,direct[0].Tag,true,true,new(),
             snapshot.DirectOutbound??throw new PanelException("上次快照缺少完整直连参数，请重新只读读取。")));
-        return new(h.Policy,exits.ToArray(),h.Total??new());
+        return new RelayPlan(h.Policy,exits.ToArray(),h.Total??new()) { FollowHealthyDns=h.ManagedDohResolvers!=null, ManagedDohResolvers=h.ManagedDohResolvers, BootstrapDohResolvers=h.ManagedDohResolvers==null?null:h.Bootstrap??DohResolvers.Domestic };
     }
 
     public async Task ApplyToLabRelay(CancellationToken ct)
@@ -213,9 +251,14 @@ public sealed partial class PanelSession(string directory, Func<SshTarget, OpenS
         if(IsDemo || !System.Net.IPAddress.TryParse(h.Target.Host,out var ip) || !System.Net.IPAddress.IsLoopback(ip))
             throw new PanelException("阶段三仅允许通过回环 IP 同步到本机隔离 SSH 环境。");
         var plan=BuildRelayPlan();
-        if(plan.Policy.DefaultRule!=null || plan.Policy.OnUnavailable.Action!=FailureAction.Reject){
+        if (plan.ManagedDohResolvers != null)
+            throw new PanelException("解析器变更需通过带 Xray 重启确认的生产发布流程。");
+        if(plan.Policy.DefaultRule!=null || plan.Policy.OnUnavailable.Action!=FailureAction.Reject || plan.FollowHealthyDns || plan.DnsOnFailure != DnsFailureAction.Reject){
             var status=await ReadRelayStatus(ct);
-            if(plan.Policy.DefaultRule!=null && !status.SupportsDefaultRoute || plan.Policy.OnUnavailable.Action!=FailureAction.Reject && !status.SupportsExitFailover)
+            if(plan.Policy.DefaultRule!=null && !status.SupportsDefaultRoute ||
+                plan.Policy.OnUnavailable.Action!=FailureAction.Reject && !status.SupportsExitFailover ||
+                plan.FollowHealthyDns && !status.SupportsEncryptedDnsRouting ||
+                plan.DnsOnFailure != DnsFailureAction.Reject && !status.SupportsDnsFailurePolicy)
                 throw new PanelException("请升级隔离 Relay 后再应用所选分流策略。");
         }
         var transport=RelayTransport(h);

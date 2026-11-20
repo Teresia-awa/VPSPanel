@@ -51,6 +51,9 @@ SetEnv CURL_CA_BUNDLE=/etc/ssl/certs/lab.pem SSL_CERT_FILE=/etc/ssl/certs/lab.pe
 CONF
 # Keep the server's self-reexec and distro-specific ssh helpers available at their compiled paths.
 if [ "$packages" != / ]; then
+    # Overlayfs exposes the upper directory's mode as /usr. The fixture's
+    # private staging umask must not prevent non-root services from running.
+    chmod 0755 "$base/upper"
     mount -t overlay overlay -o "lowerdir=$packages/usr:/usr,upperdir=$base/upper,workdir=$base/overlay-work" "$root/usr"
 fi
 cat > "$root/etc/systemd/system/fixture-ssh.service" <<'UNIT'

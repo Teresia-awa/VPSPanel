@@ -169,6 +169,102 @@ public sealed class RoutingTests
     }
 
     [Fact]
+    public void EncryptedDnsUsesOnlyHealthyProxiesAndReconnectsOnFailure()
+    {
+        var policy = RoutingPolicy.Empty.WithDefault(RouteAction.Direct).WithFailurePolicy(new(FailureAction.Direct));
+        var plan = new RelayPlan(policy,
+            [new("A", "A", false, true, new(), new()), new("B", "B", false, true, new(), new()),
+             new("D", "D", true, true, new(), new())], new()) { FollowHealthyDns = true };
+        plan = new PolicyUpdate(policy, new(), []).Apply(plan);
+        var runtime = new RoutingRuntime();
+        var state = new RuntimeState(plan, [new("A", "a", 1), new("B", "b", 2), new("D", "d", 3)]);
+        var engine = new RuleEngine(policy, new("."));
+        runtime.Publish(state, engine, new HashSet<string> { "a", "d" });
+        using var dns = runtime.Open("192.0.2.53", false, default, healthyDns: true);
+        using var ordinary = runtime.Open("192.0.2.53", false, default);
+        Assert.Equal("A", dns.Line.Lane.Id);
+        Assert.Equal("D", ordinary.Line.Lane.Id);
+        runtime.Observe("b", true, 20); runtime.Observe("b", true, 20);
+        runtime.Observe("a", false, null); runtime.Observe("a", false, null);
+        Assert.True(dns.Stop.IsCancellationRequested);
+        Assert.False(ordinary.Stop.IsCancellationRequested);
+        using var next = runtime.Open("192.0.2.53", false, default, healthyDns: true);
+        Assert.Equal("B", next.Line.Lane.Id);
+        runtime.Observe("b", false, null); runtime.Observe("b", false, null);
+        Assert.True(next.Stop.IsCancellationRequested);
+        Assert.Throws<PanelException>(() => runtime.Open("192.0.2.53", false, default, healthyDns: true));
+    }
+
+    [Fact]
+    public void EncryptedDnsRuleOverridesLegacyRouteAndCanBeRemoved()
+    {
+        const string baseline = """
+            {"inbounds":[],"dns":{"tag":"doh","servers":["https://192.0.2.53/dns-query"]},
+             "routing":{"rules":[{"ruleTag":"legacy","inboundTag":["doh"],"outboundTag":"upstream"}]},
+             "outbounds":[{"tag":"upstream","protocol":"blackhole"}]}
+            """;
+        var plan = new RelayPlan(RoutingPolicy.Empty, [], new()) { FollowHealthyDns = true };
+        var enabled = XrayManager.Compose(baseline, new(plan, []), [], 9000);
+        Assert.Equal(EncryptedDnsRoute.Tag, enabled["routing"]!["rules"]![0]!["outboundTag"]!.ToString());
+        Assert.Equal("legacy", enabled["routing"]!["rules"]![1]!["ruleTag"]!.ToString());
+        Assert.True(JsonNode.DeepEquals(enabled, XrayManager.Compose(enabled.ToJsonString(), new(plan, []), [], 9000)));
+        var disabled = XrayManager.Compose(enabled.ToJsonString(), new(plan with { FollowHealthyDns = false }, []), [], 9000);
+        Assert.Single(disabled["routing"]!["rules"]!.AsArray());
+        Assert.Single(disabled["outbounds"]!.AsArray());
+        Assert.True(JsonNode.DeepEquals(disabled["dns"], JsonNode.Parse(baseline)!["dns"]));
+        foreach (var bad in new[] { System.Text.Json.JsonSerializer.Serialize("192.0.2.53"), System.Text.Json.JsonSerializer.Serialize("https+local://192.0.2.53/dns-query"),
+            """{"address":"https://192.0.2.53/dns-query","tag":"other"}""" })
+        {
+            var invalid = baseline.Replace(System.Text.Json.JsonSerializer.Serialize("https://192.0.2.53/dns-query"), bad);
+            Assert.Throws<PanelException>(() => XrayManager.Compose(invalid, new(plan, []), [], 9000));
+        }
+    }
+
+    [Fact]
+    public void PanelDohIsolatesStaticHostsAndPreservesOriginal()
+    {
+        var original = JsonNode.Parse("""
+            {"tag":"host-dns","servers":["192.0.2.53"],"hosts":{"fixture.invalid":"192.0.2.25"},"disableFallback":true}
+            """)!.AsObject();
+        const string address = "https://192.0.2.40/dns-query";
+        var plan = new RelayPlan(RoutingPolicy.Empty, [], new())
+        {
+            FollowHealthyDns = true, ManagedDohResolvers = DohResolvers.Parse(address)
+        };
+        var state = new RuntimeState(plan, []) { PreviousDns = original };
+        var config = XrayManager.Compose("{}", state, [], 9000);
+        Assert.Equal(address, config["dns"]!["servers"]![0]!.ToString());
+        Assert.Null(config["dns"]!["hosts"]);
+        Assert.Equal("192.0.2.25", original["hosts"]!["fixture.invalid"]!.ToString());
+        Assert.Equal("192.0.2.53", original["servers"]![0]!.ToString());
+        Assert.Null(config["dns"]!["disableFallback"]);
+        Assert.Throws<PanelException>(() => DohResolvers.Parse("https://fixture.invalid/dns-query"));
+        Assert.Throws<PanelException>(() => DohResolvers.Parse("https://127.0.0.1/dns-query"));
+        Assert.Throws<PanelException>(() => DohResolvers.Parse("https://192.0.2.40/dns-query?variant=fixture"));
+    }
+
+    [Fact]
+    public void SplitDohBindsOnlyNodeNamesAndEnabledDirectDomainRules()
+    {
+        var exits = new RelayExit[] { new("p","p",false,true,new(), JsonNode.Parse("""
+            {"protocol":"hysteria","settings":{"address":"NODE.example"}}
+            """)!.AsObject()) { Aliases=["spare.example","192.0.2.4"] } };
+        var policy = new RoutingPolicy([new("g","group",true,["domain:example.cn","geosite:cn","ip:192.0.2.1"])],
+            [new("r","direct",true,"g",[],RouteAction.Direct,null),new("off","off",false,null,["full:off.example"],RouteAction.Direct,null)]);
+        var plan = new RelayPlan(policy,exits,new()) { FollowHealthyDns=true,
+            ManagedDohResolvers=["https://192.0.2.53/dns-query"],BootstrapDohResolvers=["https+local://192.0.2.54/dns-query"] };
+        Assert.Equal(new[]{"domain:example.cn","full:node.example","full:spare.example","geosite:cn"},plan.BootstrapDomains());
+        var dns = EncryptedDnsRoute.ManagedConfiguration(plan);
+        Assert.True(dns["servers"]![1]!["skipFallback"]!.GetValue<bool>());
+        Assert.True(dns["disableFallbackIfMatch"]!.GetValue<bool>());
+        var changed = plan with { Exits=[exits[0] with { Aliases=["extra.example"] }] };
+        Assert.True(plan.SameDns(changed));
+        Assert.NotEqual(plan.BootstrapDomains(),changed.BootstrapDomains());
+        Assert.Throws<PanelException>(()=>DohResolvers.Validate(plan.ManagedDohResolvers,true));
+        Assert.Throws<PanelException>(()=>DohResolvers.Validate(plan.BootstrapDohResolvers));
+    }
+
+    [Fact]
     public void PreviewAndNextAdmissionUseSameWeightsAndSequence()
     {
         var policy = RoutingPolicy.Empty; var engine = new RuleEngine(policy, new("."));

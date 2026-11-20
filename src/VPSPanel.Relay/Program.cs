@@ -9,7 +9,28 @@ using VPSPanel.Relay;
 try
 {
     if (args is ["version"]) { Console.WriteLine("VPSPanel.Relay "+RecoveryPackage.RelayVersion); return 0; }
-    if (args is ["capabilities"]) { Console.WriteLine("configurable-default"); Console.WriteLine("exit-failover"); return 0; }
+    if (args is ["capabilities"]) { Console.WriteLine("configurable-default"); Console.WriteLine("exit-failover"); Console.WriteLine("encrypted-dns-routing"); Console.WriteLine("split-doh"); Console.WriteLine("managed-doh"); return 0; }
+    if (args is ["prepare-probe", var directory])
+    {
+        var state = Disk.Read<RuntimeState>(Path.Combine(directory, "committed.json"));
+        if (state.Plan.ManagedDohResolvers == null) { Console.WriteLine("existing"); return 0; }
+        var outbound = System.Text.Json.Nodes.JsonNode.Parse(Console.OpenStandardInput())!.AsObject();
+        var settings = outbound["settings"]!;
+        var endpoint = settings["vnext"] is System.Text.Json.Nodes.JsonArray list ? list[0]! : settings;
+        var hostname = endpoint["address"]!.ToString();
+        var address = await BootstrapDns.Resolve(hostname, state.Plan.BootstrapDohResolvers ?? DohResolvers.Domestic, CancellationToken.None);
+        var stream = outbound["streamSettings"]!;
+        var tls = stream["security"]?.ToString() == "reality" ? stream["realitySettings"] : stream["tlsSettings"];
+        if (tls != null && string.IsNullOrEmpty(tls["serverName"]?.ToString())) tls["serverName"] = hostname;
+        endpoint["address"] = address.ToString();
+        Console.WriteLine(outbound.ToJsonString());
+        return 0;
+    }
+    if (args is ["recover-dns", var dnsDirectory, var dnsId])
+    {
+        await DnsRestartGuard.Recover(Path.GetFullPath(dnsDirectory), dnsId, CancellationToken.None);
+        return 0;
+    }
     if (args is ["restore-unpack",var package,var target]) { await RestoreRuntime.Unpack(package,target); return 0; }
     if (args is ["restore-check",var release]) { await RestoreRuntime.Check(release); return 0; }
     if (args is [("submit" or "submit-policy" or "submit-existing"), var folder, var planFile])
@@ -35,16 +56,19 @@ try
     var token = stop.Token;
     var runtime = new RoutingRuntime();
     var manager = new XrayManager(work, options, runtime);
+    using var listener = new TcpListener(IPAddress.Loopback, options.ListenPort);
+    using var dnsListener = new TcpListener(IPAddress.Parse(EncryptedDnsRoute.LoopbackAddress), options.ListenPort);
+    dnsListener.Start();
     await manager.Start(token);
     Disk.Write(Path.Combine(work, "status.json"), JsonSerializer.Serialize(runtime.Snapshot()));
-    using var listener = new TcpListener(IPAddress.Loopback, options.ListenPort); listener.Start();
+    listener.Start();
     async Task Health()
     {
         while (!token.IsCancellationRequested)
         {
             await Task.WhenAll(runtime.ActiveLanes().Select(async lane =>
             {
-                try { double ms = await Socks.Check(lane.Port, check, token); runtime.Observe(lane.Tag, true, ms); }
+                try { double ms = await Socks.Check(lane.Port, check, token, manager.CurrentPlan.HealthResolvers(lane.Id)); runtime.Observe(lane.Tag, true, ms); }
                 catch (Exception ex) when (ex is not OutOfMemoryException) { runtime.Observe(lane.Tag, false, null); }
             }));
             await Task.Delay(TimeSpan.FromSeconds(options.ProbeSeconds), token);
@@ -68,7 +92,7 @@ try
             if (File.Exists(path))
             {
                 string id = ""; string? error = null;
-                try { var req = Disk.Read<Submission>(path); id = req.Id; var plan = req.Update?.Apply(manager.CurrentPlan) ?? req.Plan ?? throw new PanelException("缺少 Relay 方案。"); await manager.Apply(plan, token); }
+                try { var req = Disk.Read<Submission>(path); id = req.Id; var plan = req.Update?.Apply(manager.CurrentPlan) ?? req.Plan ?? throw new PanelException("缺少 Relay 方案。"); await manager.Apply(plan, token, req.XrayService, req.Id); }
                 catch (Exception ex) when (!token.IsCancellationRequested && ex is not OutOfMemoryException)
                 {
                     if (File.Exists(Path.Combine(work, "transaction.json"))) throw new PanelException("事务恢复未完成，请重启 Relay 以重试。");
@@ -94,7 +118,8 @@ try
             await Task.Delay(250, token);
         }
     }
-    var tasks = new[] { new RelayServer(runtime).Serve(listener, token), Health(), Metrics(), Changes() };
+    var server = new RelayServer(runtime);
+    var tasks = new[] { server.Serve(listener, token), server.Serve(dnsListener, token, healthyDns: true), Health(), Metrics(), Changes() };
     await Task.WhenAny(tasks); stop.Cancel();
     try { await Task.WhenAll(tasks); } catch (OperationCanceledException) when (!tasks.Any(t => t.IsFaulted)) { }
     return 0;

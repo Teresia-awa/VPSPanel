@@ -14,6 +14,16 @@ ctx.set_alpn_protocols(["http/1.1"])
 ctx.load_cert_chain("tls.pem","tls.key")
 srv.socket = ctx.wrap_socket(srv.socket,server_side=True)
 threading.Thread(target=srv.serve_forever,daemon=True).start()
+# The two paths are served with a private fixture CA and an IP subjectAltName.
+import runpy
+fixture = runpy.run_path(str(Path(__file__).resolve().with_name("relay-e2e.py")))
+doh = fixture["Server"](("192.0.2.53",24453),fixture["DohHandler"])
+doh.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+doh.tls.load_cert_chain("tls.pem","tls.key")
+doh.tls.set_alpn_protocols(["h2"])
+doh.records = {name:"127.0.0.1" for name in ("node.test","spare.test","check.test")}
+doh.queries, doh.answer = [], "192.0.2.8"
+threading.Thread(target=doh.serve_forever,daemon=True).start()
 cert = str(base/"tls.pem")
 auth = secrets.token_hex(16)
 def raw(name, o):
@@ -23,7 +33,7 @@ def raw(name, o):
 tls = dict(serverName="node.test",alpn=["h3"],certificates=[dict(usage="verify",certificateFile=cert)])
 hy2 = dict(tag="lab-up",protocol="hysteria",settings=dict(version=2,address="node.test",port=23443),streamSettings=dict(network="hysteria",security="tls",tlsSettings=tls,hysteriaSettings=dict(version=2,auth=auth)))
 ingress = dict(listen="127.0.0.1",port=23443,protocol="hysteria",settings=dict(version=2,users=[dict(auth=auth)]),streamSettings=dict(network="hysteria",security="tls",tlsSettings=dict(alpn=["h3"],certificates=[dict(certificateFile=cert,keyFile=str(base/"tls.key"))]),hysteriaSettings=dict(version=2)))
-up = raw("upstream",dict(inbounds=[ingress],outbounds=[dict(protocol="freedom",settings=dict(finalRules=[dict(action="allow",ip=["127.0.0.1/32"],port="24443"),dict(action="block")]))]))
+up = raw("upstream",dict(inbounds=[ingress],outbounds=[dict(protocol="freedom",settings=dict(finalRules=[dict(action="allow",ip=["127.0.0.1/32","192.0.2.53/32"],port="24443,24453"),dict(action="block")]))]))
 keys = [line.split(":",1)[1].strip() for line in subprocess.check_output(["./xray","x25519"],text=True).splitlines()[:2]]
 uid = str(uuid.uuid4())
 sid = secrets.token_hex(4)
@@ -33,7 +43,7 @@ vless = dict(tag="lab-reality",protocol="vless",settings=dict(address="node.test
              streamSettings=dict(network="raw",security="reality",realitySettings=dict(serverName="node.test",fingerprint="chrome",publicKey=keys[1],shortId=sid)))
 vless_in = dict(tag="test-in",listen="127.0.0.1",port=23445,protocol="vless",settings=dict(decryption="none",clients=[dict(id=uid)]),
                 streamSettings=dict(network="raw",security="reality",realitySettings=reality))
-direct = dict(tag="lab-direct",protocol="freedom",settings=dict(finalRules=[dict(action="allow",ip=["127.0.0.1/32"],port="24443"),dict(action="block")]))
+direct = dict(tag="lab-direct",protocol="freedom",settings=dict(finalRules=[dict(action="allow",ip=["127.0.0.1/32","192.0.2.53/32"],port="24443,24453"),dict(action="block")]))
 rules = [dict(type="field",domain=["domain:fixture.invalid"],outboundTag="lab-up"),
          dict(type="field",ip=["192.0.2.0/24"],outboundTag="lab-direct"),
          dict(type="field",domain=["domain:media.invalid"],outboundTag="lab-reality"),

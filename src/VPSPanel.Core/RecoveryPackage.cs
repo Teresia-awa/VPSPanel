@@ -18,7 +18,8 @@ public sealed record OpenPackage(PackageManifest Manifest, Dictionary<string, by
 public static class RecoveryPackage
 {
     public const string KernelVersion = "26.10.31";
-    public const string RelayVersion = "1.4.0";
+    public const string RelayVersion = "1.5.0";
+    public const string LegacyRelayVersion = "1.4.0";
     public static readonly IReadOnlyList<string> Required = Array.AsReadOnly(new[] {
         "source.json","portable.json","panel.json","plan.json","geoip.dat","geosite.dat","relay-geoip.dat","relay-geosite.dat","xray","relay" });
     private static readonly byte[] Magic = "VPSPKG01"u8.ToArray();
@@ -44,19 +45,19 @@ public static class RecoveryPackage
     private static void Validate(PackageManifest m)
     {
         if(m.Format!=1 || m.Architecture is not ("x86_64" or "aarch64") ||
-            m.XrayVersion!=KernelVersion || m.RelayVersion!=RelayVersion || m.Files==null ||
+            m.XrayVersion!=KernelVersion || m.RelayVersion is not (RelayVersion or LegacyRelayVersion) || m.Files==null ||
             !m.Files.Select(f=>f.Name).SequenceEqual(Required) ||
             m.Files.Any(f=>f.Length<=0 || f.Length>MaxFile || f.Sha256.Length!=64 || !f.Sha256.All(Uri.IsHexDigit)) ||
             m.Files.Sum(f=>f.Length)>MaxTotal)throw new PanelException("版本清单不兼容、缺少文件或超过大小限制。");
     }
 
-    public static PackageManifest Export(string path,string password,string confirmation,Dictionary<string,byte[]> files)
+    public static PackageManifest Export(string path,string password,string confirmation,Dictionary<string,byte[]> files,string relayVersion=RelayVersion)
     {
         if(password!=confirmation) throw new PanelException("两次输入的备份口令不一致。");
         if(Required.Any(n=>!files.ContainsKey(n)))throw new PanelException("恢复材料不完整。");
         string arch=ElfArchitecture(files["xray"]);
         if(ElfArchitecture(files["relay"])!=arch)throw new PanelException("Xray 与 Relay 的目标架构不同。");
-        var manifest=new PackageManifest(1,arch,KernelVersion,RelayVersion,DateTimeOffset.UtcNow,
+        var manifest=new PackageManifest(1,arch,KernelVersion,relayVersion,DateTimeOffset.UtcNow,
             Required.Select(name=>new PackageFile(name,files[name].LongLength,Convert.ToHexString(SHA256.HashData(files[name])))).ToArray());
         Validate(manifest);
         path=Path.GetFullPath(path);

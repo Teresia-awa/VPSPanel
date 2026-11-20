@@ -15,6 +15,7 @@ cd /run/panel-lab
 base=$PWD
 umask 077
 ip link set lo up
+ip address add 192.0.2.53/32 dev lo
 if [ "$packages" != "/" ]; then
     mount --bind "$packages/usr/lib/openssh" /usr/lib/openssh
     export LD_LIBRARY_PATH="$packages/usr/lib/x86_64-linux-gnu"
@@ -40,7 +41,7 @@ cp agent_key.pub "$bridge/agent-public"
 ssh-agent -D -a "$base/agent.sock" >/dev/null 2>&1 & agent=$!
 for i in {1..60}; do [ -S "$base/agent.sock" ] && break; sleep .05; done
 SSH_AUTH_SOCK="$base/agent.sock" ssh-add agent_key >/dev/null 2>&1
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=check.test -addext 'subjectAltName=DNS:check.test,DNS:node.test' -keyout tls.key -out tls.pem 2>/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=check.test -addext 'subjectAltName=DNS:check.test,DNS:node.test,IP:192.0.2.53' -keyout tls.key -out tls.pem 2>/dev/null
 python3 "$fixture/backend.py" "$base" >backend.log 2>&1 & backend=$!
 daemon=''
 alternate=''

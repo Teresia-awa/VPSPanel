@@ -1,10 +1,17 @@
 using System.Diagnostics;
+using System.Net;
 using VPSPanel.Core;
 
 namespace VPSPanel.Relay;
 
 public sealed record Lane(string Id, string Tag, int Port);
-public sealed record RuntimeState(RelayPlan Plan, Lane[] Lanes);
+public sealed record RuntimeState(RelayPlan Plan, Lane[] Lanes)
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public System.Text.Json.Nodes.JsonObject? PreviousDns { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public System.Text.Json.Nodes.JsonObject? PreviousGeodata { get; init; }
+}
 internal sealed class Line(Lane lane)
 {
     public Lane Lane { get; } = lane;
@@ -22,9 +29,10 @@ internal sealed class Lease : IDisposable
     internal Line Line { get; }
     internal CancellationTokenSource Stop { get; }
     internal bool Udp { get; }
+    internal bool EncryptedDns { get; }
     internal long LastActivity = Stopwatch.GetTimestamp();
-    internal Lease(RoutingRuntime owner, Line line, bool udp, CancellationToken token)
-    { runtime = owner; Line = line; Udp = udp; Stop = CancellationTokenSource.CreateLinkedTokenSource(token); }
+    internal Lease(RoutingRuntime owner, Line line, bool udp, bool encryptedDns, CancellationToken token)
+    { runtime = owner; Line = line; Udp = udp; EncryptedDns = encryptedDns; Stop = CancellationTokenSource.CreateLinkedTokenSource(token); }
     public void Bytes(int count, bool upload)
     {
         if (upload) Interlocked.Add(ref Line.UpBytes, count);
@@ -55,6 +63,8 @@ internal sealed class RoutingRuntime
                 if (verified.Contains(lane.Tag)) { line.Healthy = true; line.Recovery = .25; line.Good = 2; }
             }
             state = next; engine = compiled; Rates.Configure(next.Plan);
+            foreach (var session in sessions.Where(s => s.EncryptedDns && (!next.Plan.FollowHealthyDns || s.Line.Retired != null)))
+                session.Stop.Cancel();
         }
     }
     private RelaySnapshot Sample()
@@ -68,20 +78,26 @@ internal sealed class RoutingRuntime
                 line?.Latency ?? 0, line?.Failures ?? 0, generations.Sum(g => g.Rate), generations.Sum(g => g.Active), line?.Recovery ?? 0, line?.Assigned ?? 0,
                 generations.Sum(g => g.UpRate), generations.Sum(g => g.DownRate));
         }).ToArray();
-        return new(DateTimeOffset.UtcNow, sequence, items) { SupportsDefaultRoute = true, SupportsExitFailover = true };
+        return new(DateTimeOffset.UtcNow, sequence, items)
+        { SupportsDefaultRoute = true, SupportsExitFailover = true, SupportsEncryptedDnsRouting = true, SupportsDnsFailurePolicy = false, SupportsManagedDoh = true, SupportsSplitDoh = true };
     }
     public RelaySnapshot Snapshot() { lock (gate) return Sample(); }
-    public Lease Open(string target, bool udp, CancellationToken token)
+    public Lease Open(string target, bool udp, CancellationToken token, bool healthyDns = false)
     {
         lock (gate)
         {
-            var decision = engine.Select(target, Sample()); sequence++;
-            if (decision.Error != null) throw new PanelException(decision.Error);
-            var lane = state.Lanes.Single(l => l.Id == decision.Exit);
-            var line = lines[lane.Tag];
-            var session = new Lease(this, line, udp, token);
-            sessions.Add(session); line.Active++; line.Assigned++; return session;
+            if (healthyDns && !state.Plan.FollowHealthyDns) throw new PanelException("加密 DNS 健康出口尚未启用。");
+            var decision = engine.Select(target, Sample(), healthyDns); sequence++;
+            if (decision.Error == null)
+                return Admit(state.Lanes.Single(l => l.Id == decision.Exit), udp, healthyDns, token);
+            throw new PanelException(decision.Error);
         }
+    }
+    private Lease Admit(Lane lane, bool udp, bool dns, CancellationToken token)
+    {
+        var line = lines[lane.Tag];
+        var session = new Lease(this, line, udp, dns, token);
+        sessions.Add(session); line.Active++; line.Assigned++; return session;
     }
     internal void Release(Lease lease) { lock (gate) { if (sessions.Remove(lease)) lease.Line.Active--; } }
     public void Observe(string tag, bool success, double? milliseconds)
@@ -90,7 +106,18 @@ internal sealed class RoutingRuntime
         {
             if (!lines.TryGetValue(tag, out var line) || line.Retired != null) return;
             line.Failures = .8 * line.Failures + (success ? 0 : .2);
-            if (!success) { line.Good = 0; if (++line.Bad >= 2) { line.Healthy = false; line.Recovery = 0; } return; }
+            if (!success)
+            {
+                line.Good = 0;
+                if (++line.Bad >= 2 && line.Healthy)
+                {
+                    line.Healthy = false;
+                    line.Recovery = 0;
+                    foreach (var session in sessions.Where(s => s.EncryptedDns && s.Line == line))
+                        session.Stop.Cancel();
+                }
+                return;
+            }
             if (milliseconds is not double measured) return;
             measured = Math.Max(.1, measured);
             line.Baseline = line.Baseline == 0 ? measured : Math.Min(measured, line.Baseline * 1.001);

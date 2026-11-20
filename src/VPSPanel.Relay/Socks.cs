@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Http.Headers;
 using System.Text;
 
 namespace VPSPanel.Relay;
@@ -54,7 +55,34 @@ internal static class Socks
         catch { tcp.Dispose(); throw; }
     }
 
-    internal static async Task<double> Check(int port, Uri url, CancellationToken ct)
+    internal static async Task<byte[]> ExchangeDoh(int port, Uri resolver, byte[] query, CancellationToken ct, bool requireHttp2 = false)
+    {
+        using var handler = new SocketsHttpHandler
+        {
+            UseProxy = false, AllowAutoRedirect = false,
+            ConnectCallback = async (context, token) =>
+            {
+                var ep = context.DnsEndPoint;
+                var (socket, _) = await Connect(port, 1, new(ep.Host, ep.Port), token);
+                return socket.GetStream();
+            }
+        };
+        using var http = new HttpClient(handler) { MaxResponseContentBufferSize = ushort.MaxValue };
+        using var request = new HttpRequestMessage(HttpMethod.Post, resolver)
+        {
+            Content = new ByteArrayContent(query), Version = HttpVersion.Version20,
+            VersionPolicy = requireHttp2 ? HttpVersionPolicy.RequestVersionExact : HttpVersionPolicy.RequestVersionOrLower
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
+        request.Headers.Accept.ParseAdd("application/dns-message");
+        using var reply = await http.SendAsync(request, ct);
+        if (!reply.IsSuccessStatusCode || reply.Content.Headers.ContentType?.MediaType != "application/dns-message") throw new IOException("DoH 响应无效。");
+        byte[] answer = await reply.Content.ReadAsByteArrayAsync(ct);
+        if (answer.Length < 12 || answer[0] != query[0] || answer[1] != query[1] || (answer[2] & 0x80) == 0) throw new IOException("DoH 响应无效。");
+        return answer;
+    }
+
+    internal static async Task<double> Check(int port, Uri url, CancellationToken ct, string[]? bootstrap = null)
     {
         long start = System.Diagnostics.Stopwatch.GetTimestamp();
         using var handler = new SocketsHttpHandler
@@ -63,11 +91,13 @@ internal static class Socks
             AllowAutoRedirect = false,
             ConnectCallback = async (request, token) =>
             {
-                var (tcp, _) = await Connect(port, 1, new(request.DnsEndPoint.Host, request.DnsEndPoint.Port), token);
+                var host = request.DnsEndPoint.Host;
+                if (bootstrap != null) host = (await BootstrapDns.Resolve(host, bootstrap, token)).ToString();
+                var (tcp, _) = await Connect(port, 1, new(host, request.DnsEndPoint.Port), token);
                 return tcp.GetStream(); // NetworkStream owns the socket.
             }
         };
-        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(6) };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(bootstrap == null ? 6 : 8 + bootstrap.Length * 3) };
         using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode != HttpStatusCode.NoContent) throw new IOException("探测目标未返回 204。");
         return System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;

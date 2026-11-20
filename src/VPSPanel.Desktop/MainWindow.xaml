@@ -94,6 +94,40 @@
             <TextBlock x:Name="FailureNotice" TextWrapping="Wrap" Margin="0,5,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite"/>
             <local:PublishView x:Name="FailurePublisher"/>
           </StackPanel></Border>
+          <TextBlock Text="DNS" FontWeight="SemiBold" Margin="0,16,0,8"/>
+          <Border Style="{StaticResource PanelCard}"><StackPanel>
+            <Label Content="Xray DNS 解析器" Target="{Binding ElementName=DnsResolverMode}" Padding="0" Margin="0,0,0,4"/>
+            <ComboBox x:Name="DnsResolverMode" SelectedValuePath="Tag" SelectionChanged="DnsResolverEdited"
+                      AutomationProperties.Name="Xray DNS 解析器" HorizontalAlignment="Left" MinWidth="210">
+              <ComboBoxItem Content="面板托管加密 DNS（推荐）" Tag="Managed"/>
+              <ComboBoxItem Content="沿用服务器原有 DNS" Tag="Existing"/>
+            </ComboBox>
+            <Grid x:Name="DohEditor" Margin="0,10,0,0" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <Label Content="代理流量 DoH（经健康上游）" Target="{Binding ElementName=DohAddresses}" Padding="0"/>
+                <TextBox x:Name="DohAddresses" AcceptsReturn="True" MinLines="2" MaxLines="4" TextChanged="DnsResolverEdited" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                <WrapPanel Margin="0,6,0,0">
+                  <Button Content="Cloudflare" Tag="https://1.1.1.1/dns-query" Click="FillDohPreset" Margin="0,0,4,4"/>
+                  <Button Content="Google" Tag="https://8.8.8.8/dns-query" Click="FillDohPreset"/>
+                </WrapPanel>
+                <TextBlock Text="每行一个纯 IP HTTPS 地址。全部上游失效时拒绝代理解析。" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <Label Content="直连与节点引导 DoH（本机直发）" Target="{Binding ElementName=BootstrapAddresses}" Padding="0"/>
+                <TextBox x:Name="BootstrapAddresses" AcceptsReturn="True" MinLines="2" MaxLines="4" TextChanged="DnsResolverEdited" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                <WrapPanel Margin="0,6,0,0">
+                  <Button Content="国内中转" Tag="Domestic" Click="FillDohPreset" Margin="0,0,4,4"/>
+                  <Button Content="海外中转" Tag="Overseas" Click="FillDohPreset"/>
+                </WrapPanel>
+                <TextBlock Text="每行一个纯 IP https+local:// 地址。直连规则、节点域名及 Relay 探活使用此列表。" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+              </StackPanel>
+            </Grid>
+            <Button x:Name="SaveDohDraft" Content="保存 DNS 草稿" HorizontalAlignment="Left" Click="SaveDnsResolvers" Margin="0,8,0,4"/>
+            <TextBlock x:Name="EncryptedDnsNotice" Margin="0,5,0,0" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite"/>
+            <local:PublishView x:Name="EncryptedDnsPublisher"/>
+          </StackPanel></Border>
         </StackPanel></ScrollViewer>
       </Grid>
     </Border>
