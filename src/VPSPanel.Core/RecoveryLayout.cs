@@ -4,7 +4,10 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace VPSPanel.Core;
 
-public sealed record MigrationProfile(ExitWorkspace Workspace, RoutingPolicy Policy, Bandwidth Total, string ClientHost, string CheckUrl);
+public sealed record MigrationProfile(ExitWorkspace Workspace, RoutingPolicy Policy, Bandwidth Total, string ClientHost, string CheckUrl)
+{
+    public int? SourceRelayPort { get; init; }
+}
 public sealed record RecoveryClient(string Tag, string User, int Port, string Flow, string Sni, string PublicKey, string ShortId, string Listen)
 {
     public string Link(string host)
@@ -22,6 +25,9 @@ public static class RecoveryLayout
 {
     public const string ProxyTag="vpspanel-user-relay";
     public const string ApiTag="vpspanel-control";
+    public const string EncryptedDnsTag="vpspanel-encrypted-dns";
+    public const string DnsGenerationTag=EncryptedDnsTag+"-generation";
+    public const string DnsUnmatchedTag=EncryptedDnsTag+"-unmatched";
     public static JsonObject Parse(string text) => JsonNode.Parse(text,documentOptions:new(){CommentHandling=JsonCommentHandling.Skip,AllowTrailingCommas=true})!.AsObject();
     public static List<RecoveryClient> Clients(JsonObject config)
     {
@@ -52,9 +58,52 @@ public static class RecoveryLayout
         if(clients.Count==0)throw new PanelException("未找到可验证的 VLESS REALITY 用户入口。");
         return clients;
     }
-    public static JsonObject RouteUsers(JsonObject source,int apiPort,int relayPort)
+    private static JsonNode[] RelayServers(JsonObject root,int relayPort)
+    {
+        var servers=new List<JsonNode>();
+        foreach(var outbound in root["outbounds"]!.AsArray()){
+            if(outbound?["protocol"]?.ToString()!="socks")continue;
+            var settings=outbound["settings"];
+            IEnumerable<JsonNode?> endpoints=settings?["servers"] is JsonArray list ? list : [settings];
+            foreach(var endpoint in endpoints){
+                if(endpoint?["address"]?.ToString() is "127.0.0.1" or "localhost" &&
+                    int.TryParse(endpoint["port"]?.ToString(),out int port) && port==relayPort)
+                    servers.Add(endpoint);
+            }
+        }
+        if(relayPort is <1 or >65535 || servers.Count==0)
+            throw new PanelException("无法确认托管配置中的 Relay 调度出口。");
+        return servers.ToArray();
+    }
+
+    public static JsonObject ExportManaged(JsonObject managed, IReadOnlySet<string> lanes, bool followHealthyDns,int relayPort)
+    {
+        var root=managed.DeepClone().AsObject();
+        if(root["api"]?["tag"]?.ToString()!=ApiTag)throw new PanelException("无法确认托管配置的管理 API。");
+        // Strip regenerated handlers by committed identity. All other entries keep their order and settings.
+        void RemoveGenerated(JsonArray entries,string key,params string[] dnsTags)
+        {
+            foreach(var entry in entries.ToArray()){
+                string tag=entry?[key]?.ToString()??"";
+                if(lanes.Contains(tag) || followHealthyDns && dnsTags.Contains(tag))entries.Remove(entry);
+            }
+        }
+        RemoveGenerated(root["inbounds"]!.AsArray(),"tag");
+        RemoveGenerated(root["outbounds"]!.AsArray(),"tag",EncryptedDnsTag);
+        RemoveGenerated(root["routing"]!["rules"]!.AsArray(),"ruleTag",EncryptedDnsTag,DnsGenerationTag,DnsUnmatchedTag);
+        _=RelayServers(root,relayPort);
+        return root;
+    }
+
+    public static JsonObject RouteUsers(JsonObject source,int apiPort,int relayPort,int? sourceRelayPort=null)
     {
         var root=source.DeepClone().AsObject();
+        if(sourceRelayPort is int previousPort){
+            if(root["api"]?["tag"]?.ToString()!=ApiTag)throw new PanelException("恢复包中的托管入口元数据无效。");
+            root["api"]!["listen"]="127.0.0.1:"+apiPort;
+            foreach(var server in RelayServers(root,previousPort))server["port"]=relayPort;
+            return root;
+        }
         var tags=Clients(root).Select(c=>c.Tag).Distinct().ToHashSet();
         var outs=root["outbounds"]!.AsArray();
         if(root["api"]!=null || outs.Any(o=>o?["tag"]?.ToString()==ProxyTag))

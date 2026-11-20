@@ -80,13 +80,14 @@ def binding(unit):
         active = {}
     dns = active.get("dns") or {}
     mode = "configured" if dns else "none"
-    return str(source), settings["CheckUrl"], mode, cfg.get("dns"), cfg.get("geodata")
+    return str(source), settings, mode, cfg
 
 
 def handle():
     data = json.load(sys.stdin)
     op, unit = data["Op"], data["Service"].removesuffix(".service")
-    source, url, dns_mode, persistent_dns, persistent_geo = binding(unit)
+    source, settings, dns_mode, config = binding(unit)
+    persistent_dns, persistent_geo = config.get("dns"), config.get("geodata")
     state = work / "committed.json"
     request = work / "request.json"
     journal = work / "transaction.json"
@@ -100,8 +101,8 @@ def handle():
         uses_asset = any(isinstance(s, dict) and "ext:vpspanel-bootstrap.dat:bindings" in s.get("domains", [])
                          for s in (persistent_dns or {}).get("servers", []))
         original_geo = committed.get("PreviousGeodata") if uses_asset else persistent_geo
-        return dict(Revision=hashlib.sha256(raw).hexdigest(), Plan=plan,
-                    Source=source, CheckUrl=url,
+        result = dict(Revision=hashlib.sha256(raw).hexdigest(), Plan=plan,
+                    Source=source, CheckUrl=settings["CheckUrl"],
                     SupportsDefaultRoute=status.get("SupportsDefaultRoute") is True,
                     SupportsExitFailover=status.get("SupportsExitFailover") is True,
                     SupportsEncryptedDnsRouting=status.get("SupportsEncryptedDnsRouting") is True,
@@ -109,8 +110,36 @@ def handle():
                     SupportsSplitDoh=status.get("SupportsSplitDoh") is True,
                     SupportsManagedDoh=status.get("SupportsManagedDoh") is True, ServerDnsMode=dns_mode,
                     UsesBootstrapAsset=uses_asset,
-                    OriginalGeodata=original_geo if data.get("IncludeDnsSource") is True else None,
-                    OriginalDns=original if data.get("IncludeDnsSource") is True else None)
+                    OriginalGeodata=original_geo if data.get("ExportLayout") is True else None,
+                    OriginalDns=original if data.get("ExportLayout") is True else None)
+        if data.get("ExportLayout") is True:
+            # A systemd credential can still contain the boot-time copy after an API hot update.
+            # Check the running handlers against the bound, durable configuration.
+            def live_rows(command, field):
+                result = subprocess.check_output([settings["Xray"], "api", command,
+                                                  "--server=127.0.0.1:" + str(settings["ApiPort"])],
+                                                 stderr=subprocess.DEVNULL, timeout=12)
+                return json.loads(result).get(field, [])
+
+            running = {i.get("tag", "") for i in live_rows("lsi", "inbounds")}
+            stored = {i.get("tag", "") for i in config["inbounds"]}
+            extra = running - stored - {"vpspanel-control"}
+            if stored - running or any(not re.fullmatch(r"vp3-[0-9a-f]{32}", tag) for tag in extra):
+                raise ValueError("layout changed")
+            # Draining generations may still own an extra routing rule until their sessions end.
+            active_rules = [(r.get("ruleTag"), r.get("tag")) for r in live_rows("lsrules", "rules")
+                            if r.get("ruleTag") not in extra]
+            # The Xray API reports no outbound tag for a balancer rule.
+            expected_rules = [(r.get("ruleTag") or None, r.get("outboundTag") or None)
+                              for r in config["routing"]["rules"]]
+            if active_rules != expected_rules:
+                raise ValueError("layout changed")
+            if (request.exists() or journal.exists() or state.read_bytes() != raw or
+                    json.loads((work / "xray.json").read_bytes()) != config):
+                raise ValueError("layout changed")
+            result.update(ExportLayout=config, LaneTags=[lane["Tag"] for lane in committed["Lanes"]],
+                          RelayPort=settings["ListenPort"])
+        return result
 
     if op == "inspect":
         if request.exists() or journal.exists():
@@ -177,5 +206,5 @@ def handle():
 try:
     print(json.dumps(handle(), ensure_ascii=True))
 except Exception as error:
-    safe = ("inactive", "relay identity", "kernel identity", "config binding", "config identity", "stale status")
+    safe = ("inactive", "relay identity", "kernel identity", "config binding", "config identity", "stale status", "layout changed")
     print(json.dumps(dict(Status="unavailable", Reason=str(error) if isinstance(error, ValueError) and str(error) in safe else "read")))

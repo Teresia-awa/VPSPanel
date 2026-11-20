@@ -120,34 +120,35 @@ public sealed partial class PanelSession
         progress?.Report("正在读取源配置和入口身份…");
         var transport=IsDemo?null:RelayTransport(h);
         try{
-            string raw,portableRaw;
-            if(transport==null)raw=portableRaw=DemoSource(h);
-            else if(h.Target.Service=="vpspanel-restored-xray" && h.ConfigPath=="/var/lib/vpspanel/xray.json"){
-                raw=(await transport.ReadConfiguration("/var/lib/vpspanel/source.json",ct)).Json;
-                portableRaw=(await transport.ReadConfiguration("/var/lib/vpspanel/portable.json",ct)).Json;
-            }else if(h.ManagedRevision!=null){
-                var state=await PublicationRemote.Inspect(transport,h.Target,ct,includeDnsSource:plan.ManagedDohResolvers!=null);
-                if(state.Revision!=h.ManagedRevision)throw new PanelException("部署方案已变化，请重新读取主机再导出。");
-                raw=portableRaw=(await transport.ReadConfiguration(state.Source,ct)).Json;
-                if(plan.ManagedDohResolvers!=null && state.SupportsManagedDoh){
-                    var source=RecoveryLayout.Parse(portableRaw);
+            string raw;
+            var workspace=h.Workspace;
+            int? sourceRelayPort=null;
+            if(transport==null)raw=DemoSource(h);
+            else if(h.ManagedRevision!=null || h.Target.Service=="vpspanel-restored-xray" && h.ConfigPath=="/var/lib/vpspanel/xray.json"){
+                var state=await PublicationRemote.Inspect(transport,h.Target,ct,exportLayout:true);
+                if(h.ManagedRevision!=null && state.Revision!=h.ManagedRevision)throw new PanelException("部署方案已变化，请重新读取主机再导出。");
+                if(state.ExportLayout==null || state.LaneTags==null)throw new PanelException("缺少已核对的托管配置，无法导出。");
+                var source=RecoveryLayout.ExportManaged(state.ExportLayout,state.LaneTags.ToHashSet(StringComparer.Ordinal),state.Plan.FollowHealthyDns,state.RelayPort);
+                sourceRelayPort=state.RelayPort;
+                if(state.Plan.ManagedDohResolvers!=null && state.SupportsManagedDoh){
                     if(state.OriginalDns is null)source.Remove("dns");
                     else source["dns"]=state.OriginalDns.DeepClone();
                     if(state.UsesBootstrapAsset == true){
                         if(state.OriginalGeodata is null)source.Remove("geodata");
                         else source["geodata"]=state.OriginalGeodata.DeepClone();
                     }
-                    portableRaw=source.ToJsonString();
                 }
+                raw=source.ToJsonString();
+                workspace=state.Rebase(XraySnapshot.Parse(raw),h.Workspace,null);
             }else{
                 var live=await new RemoteInspection(transport).Read(h.Target,ct);
                 if(live.Version!=RecoveryPackage.KernelVersion || live.Snapshot.Digest!=h.Workspace.Snapshot?.Digest)
                     throw new PanelException("活动配置或内核已变化，请先刷新只读快照再导出。");
-                raw=portableRaw=live.RawJson;
+                raw=live.RawJson;
             }
-            var portable=RecoveryLayout.Parse(portableRaw);
+            var portable=RecoveryLayout.Parse(raw);
             _=RecoveryLayout.Clients(portable);
-            var profileNode=JsonSerializer.SerializeToNode(new MigrationProfile(h.Workspace,h.Policy,h.Total??new(),clientHost,checkUrl??h.CheckUrl??"https://www.gstatic.com/generate_204"))!;
+            var profileNode=JsonSerializer.SerializeToNode(new MigrationProfile(workspace,h.Policy,h.Total??new(),clientHost,checkUrl??h.CheckUrl??"https://www.gstatic.com/generate_204"){SourceRelayPort=sourceRelayPort})!;
             var planNode=JsonSerializer.SerializeToNode(plan)!;
             foreach(var node in new[]{portable,profileNode,planNode})await EmbedCertificates(node,transport,h.WorkingDirectory,ct);
             var items=new Dictionary<string,byte[]>{
@@ -157,6 +158,9 @@ public sealed partial class PanelSession
             var manifestBytes=await ReadInstallationFile(assets,"assets.json",ct);
             try{hashes=JsonSerializer.Deserialize<Dictionary<string,string>>(manifestBytes)??throw new JsonException();}
             catch(JsonException){throw new MaterialException("离线安装材料清单 assets.json 格式无效，请重新准备材料。");}
+            if(sourceRelayPort!=null && (!hashes.TryGetValue("relay-managed-layout",out var layoutHash) ||
+                !hashes.TryGetValue("relay",out var binaryHash) || !string.Equals(layoutHash,binaryHash,StringComparison.OrdinalIgnoreCase)))
+                throw new MaterialException("导出当前托管底稿需要 v1.1.0 或更新的离线材料包。");
             if(plan.Policy.DefaultRule!=null && (!hashes.TryGetValue("relay-configurable-default",out var capable) ||
                 !hashes.TryGetValue("relay",out var relayHash) || !string.Equals(capable,relayHash,StringComparison.OrdinalIgnoreCase)))
                 throw new MaterialException("此默认动作需要支持自定义默认分流的 Relay，请选择新版离线安装材料。");
@@ -168,7 +172,7 @@ public sealed partial class PanelSession
             if(plan.ManagedDohResolvers!=null && !splitCapable)
                 throw new MaterialException("此 DoH 配置需要新版 Relay，请选择更新的离线安装材料。");
             var sourceFiles=transport==null?new Dictionary<string,string>():await SourceAssets(transport,h,ct);
-            if(portableRaw.Contains("\"ext:",StringComparison.OrdinalIgnoreCase)||portableRaw.Contains("\"ext-ip:",StringComparison.OrdinalIgnoreCase))
+            if(raw.Contains("\"ext:",StringComparison.OrdinalIgnoreCase)||raw.Contains("\"ext-ip:",StringComparison.OrdinalIgnoreCase))
                 throw new PanelException("源配置引用了自定义外部 Geo 文件，请先将该依赖纳入迁移清单。");
             foreach(var name in InstallationFiles){
                 byte[] data=await ReadInstallationFile(assets,name,ct);
@@ -181,7 +185,7 @@ public sealed partial class PanelSession
                         if(!Convert.ToHexString(SHA256.HashData(data)).Equals(digest,StringComparison.OrdinalIgnoreCase))
                             throw new PanelException("读取期间源安装材料发生变化，请重新导出。");
                     }
-                }else if(transport!=null && name.EndsWith(".dat") && portableRaw.Contains(name[..^4]+":",StringComparison.OrdinalIgnoreCase))
+                }else if(transport!=null && name.EndsWith(".dat") && raw.Contains(name[..^4]+":",StringComparison.OrdinalIgnoreCase))
                     throw new PanelException("源配置引用的地理规则数据无法定位。");
                 if(name.EndsWith(".dat")){
                     byte[] relayGeo=data;

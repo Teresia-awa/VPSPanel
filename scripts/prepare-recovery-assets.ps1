@@ -19,6 +19,7 @@ $features=& wsl -d $Distribution -- (LinuxPath $relay) capabilities
 if($LASTEXITCODE -or $features -notcontains 'configurable-default'){throw 'Relay lacks configurable default routing.'}
 if($features -notcontains 'exit-failover'){throw 'Relay lacks exit failover support.'}
 if($features -notcontains 'split-doh'){throw 'Relay lacks managed DoH configuration.'}
+if($features -notcontains 'managed-layout'){throw 'Relay lacks managed layout restore support.'}
 [void][IO.Directory]::CreateDirectory($Destination)
 $items=@{'xray'=$Xray;'relay'=$relay;'geoip.dat'=(Join-Path $GeoDirectory geoip.dat);'geosite.dat'=(Join-Path $GeoDirectory geosite.dat)}
 $hashes=@{}
@@ -32,6 +33,7 @@ foreach($name in $items.Keys){
 $hashes['relay-configurable-default']=$hashes['relay']
 $hashes['relay-exit-failover']=$hashes['relay']
 $hashes['relay-managed-doh']=$hashes['relay']
+$hashes['relay-managed-layout']=$hashes['relay']
 $hashes['relay-split-doh']=$hashes['relay']
 [IO.File]::WriteAllText((Join-Path $Destination assets.json),($hashes|ConvertTo-Json))
 Write-Output 'Offline recovery assets verified.'

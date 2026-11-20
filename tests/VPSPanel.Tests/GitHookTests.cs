@@ -86,13 +86,20 @@ public sealed class GitHookTests : IDisposable
     }
 
     [Fact]
-    public void PushDryRunRejectsDeletedHistoricalSecret()
+    public void PrePushHookRejectsDeletedHistoricalSecret()
     {
         var bare = Path.Combine(sandbox.FullName, "destination.git");
         Good("init", "--bare", bare);
         Good("add", ".");
         Good("commit", "-m", "clean base");
-        Good("push", "--dry-run", bare, "HEAD:refs/heads/main");
+        (int Exit,string Output) RunPrePush()
+        {
+            var input=Path.Combine(sandbox.FullName,"ref-update");
+            var head=Good("rev-parse","HEAD").Trim();
+            File.WriteAllText(input,$"refs/heads/main {head} refs/heads/main {new string('0',40)}\n");
+            return Git("hook","run","--to-stdin="+input,"pre-push","--","fixture",bare);
+        }
+        Assert.Equal(0,RunPrePush().Exit);
         string value = FakeLink;
         File.WriteAllText(Path.Combine(work, "README.md"), value);
         Good("add", "README.md");
@@ -100,7 +107,7 @@ public sealed class GitHookTests : IDisposable
         Good("-c", "core.hooksPath=" + Path.Combine(sandbox.FullName, "no-hooks"), "commit", "-m", "historical fixture");
         Good("rm", "README.md");
         Good("commit", "-m", "remove fixture");
-        var rejected = Git("push", "--dry-run", bare, "HEAD:refs/heads/main");
+        var rejected = RunPrePush();
         Assert.NotEqual(0, rejected.Exit);
         Assert.Contains("README.md", rejected.Output);
         Assert.Contains("已拦截", rejected.Output);

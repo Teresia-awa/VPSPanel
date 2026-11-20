@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <EmbeddedResource Include="Fixtures/v1.0.0-package.b64" LogicalName="legacy-package" />
   </ItemGroup>
 
 </Project>

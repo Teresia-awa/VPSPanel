@@ -5,7 +5,10 @@ base = Path(sys.argv[1])
 os.chdir(base)
 class Reply(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(204 if self.path == "/ok" else 404)
+        if self.path == "/publication":
+            self.send_response(503 if (base/"reject-publication").exists() else 204)
+        else:
+            self.send_response(204 if self.path == "/ok" else 404)
         self.end_headers()
     def log_message(self, *args): pass
 srv = ThreadingHTTPServer(("127.0.0.1",24443),Reply)

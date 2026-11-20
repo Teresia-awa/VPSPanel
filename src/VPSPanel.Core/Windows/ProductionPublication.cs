@@ -21,6 +21,10 @@ public sealed class PublicationPreview
 }
 internal sealed record PublishedState(string Revision, RelayPlan Plan, string Source, string CheckUrl, bool SupportsDefaultRoute = false, bool SupportsExitFailover = false, bool SupportsEncryptedDnsRouting = false, bool SupportsDnsFailurePolicy = false, bool XrayDnsFallbackReady = false, bool SupportsManagedDoh = false, string? ServerDnsMode = null, JsonObject? OriginalDns = null, bool SupportsSplitDoh = false, bool? UsesBootstrapAsset = null, JsonObject? OriginalGeodata = null)
 {
+    public JsonObject? ExportLayout { get; init; }
+    public string[]? LaneTags { get; init; }
+    public int RelayPort { get; init; }
+
     internal ExitWorkspace Rebase(XraySnapshot original, ExitWorkspace? local, ExitWorkspace? backup)
     {
         var profiles = Plan.Exits.Where(e => !e.Direct).Select(e =>
@@ -60,12 +64,13 @@ internal static class PublicationRemote
             "inactive"=>"入口或 Relay 服务尚未运行。","relay identity"=>"Relay 进程与接管目录不匹配。",
             "kernel identity"=>"入口内核与 Relay 管理的内核不匹配。","config binding"=>"正式入口的持久配置绑定与接管目录不匹配。",
             "config identity"=>"已部署配置与 Relay 管理端口不匹配，或缺少接管源配置。","stale status"=>"Relay 实时快照已过期。",
+            "layout changed"=>"运行入口与托管配置不一致或正在变更，请核对并刷新后重新导出。",
             _=>"无法读取接管服务状态或管理文件，请检查 SSH 权限及目标服务。"});
         return reply;
     }
-    internal static async Task<PublishedState> Inspect(ISshTransport io,SshTarget target,CancellationToken ct,bool includeDnsSource=false)
+    internal static async Task<PublishedState> Inspect(ISshTransport io,SshTarget target,CancellationToken ct,bool exportLayout=false)
     {
-        var reply=await Call(io,new {Op="inspect",target.Service,IncludeDnsSource=includeDnsSource},ct);
+        var reply=await Call(io,new {Op="inspect",target.Service,ExportLayout=exportLayout},ct);
         return reply.Current??throw new PanelException("Relay 正在处理其他事务，请稍后重新预览。");
     }
 }

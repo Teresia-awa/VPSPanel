@@ -6,10 +6,10 @@ namespace VPSPanel.Relay;
 
 internal sealed record EncryptedDnsRoute(string InboundTag)
 {
-    internal const string Tag = "vpspanel-encrypted-dns";
+    internal const string Tag = RecoveryLayout.EncryptedDnsTag;
     internal const string Asset = "vpspanel-bootstrap.dat";
-    internal const string VerificationTag = Tag + "-generation";
-    internal const string UnmatchedTag = Tag + "-unmatched";
+    internal const string VerificationTag = RecoveryLayout.DnsGenerationTag;
+    internal const string UnmatchedTag = RecoveryLayout.DnsUnmatchedTag;
     internal const string LoopbackAddress = "127.0.0.2";
     internal const string PlaintextLoopback = "127.0.0.3";
     private const string PlaintextId = "vpspanel-plaintext-dns";

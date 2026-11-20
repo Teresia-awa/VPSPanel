@@ -34,7 +34,8 @@
 - **内核基线与安全变更。** 在隔离环境使用已知的锁定版本验证。配置文件先经 `xray run -test -c` 校验，按根目录规格区分动态出口切换和需要重启的入口变更；后者由 VPS 看门狗负责超时回滚。
 - **动态变更与排空。** 新增、切换和移除出口都必须同步原子落盘并静态校验；运行状态与持久化配置一致才报告成功。旧出口停止接收新会话，已有会话自然结束或空闲超时后回收，设最大排空期限。排空不阻塞后续切换，重启恢复最新已提交状态。具体期限与异常处理见 [VPS.md](VPS.md)。
 - **桌面视觉约束。** 对齐 Windows 11「设置」。优先使用 .NET 10 原生 WPF Fluent 控件和 Segoe Fluent Icons；需要补足控件时可选成熟 WPF-UI 库。业务卡片可轻量组合，图表优先使用成熟轻量组件。所有自定义表面、文字、状态和图表颜色使用语义画刷并以 DynamicResource 绑定，标准控件继承主题。设置页提供跟随系统、浅色、深色，偏好保存在本地配置目录。
-- **视觉定稿。** 阶段一空壳经用户确认后，先用生图模型制作首页总览、出口管理、规则与测试目标、备份与迁移四个核心页面的效果图，参考用户提供的图，先确定布局与信息密度。获用户定稿后才实现业务界面；文案和字段以 VPS.md 为准。
+- **界面基线。** 首页与设置的离线实机截图位于 `docs/screenshots/`，文案和字段以 VPS.md 为准。
+- **DNS 与备份。** 托管模式下，代理 DoH 经健康上游，全失效时拒绝解析。直连与节点引导使用本机直发的纯 IP DoH，Relay 使用该栏进行直连探活与预检。面板不修改宿主机系统 DNS。已接管主机的常规导出以当前托管配置为底稿，保留有效的非托管入口、前置路由与顺序；历史原件按冷备份保留。
 - **共享核心库与匹配单一来源。** 规则匹配、GeoIP/GeoSite 解析、配置模型与加密备份逻辑放在共享类库 `VPSPanel.Core`。固定规则核对实际出口；自动分摊按同一状态快照比较候选与预计出口。
 - **SSH 接入与离线分发：**
   - SSH 别名使用系统 `ssh.exe` / `sftp.exe`，兼容本机别名、跳板机与 OpenSSH Agent；该模式由 OpenSSH 管理私钥。主机直连由 SSH.NET 在进程内使用用户提供的密码或选定的本地私钥，凭据与指纹处理遵循 [VPS.md](VPS.md)。
@@ -68,5 +69,5 @@
   - 一键启用仓库钩子并构建、测试：双击 [构建与测试.cmd](构建与测试.cmd)
   - 打包桌面端：[scripts/publish-desktop.ps1](scripts/publish-desktop.ps1)，输出 `publish/desktop/VPSPanel.Desktop.exe`
   - 发布 Linux 单文件骨架：[scripts/publish-relay.ps1](scripts/publish-relay.ps1)，默认 linux-x64，可指定 linux-arm64
-  - 单独验证 Git 钩子：`dotnet test --filter FullyQualifiedName~GitHookTests`。测试包含临时本地仓库的推送预演。
+  - 单独验证 Git 钩子：`dotnet test --filter FullyQualifiedName~GitHookTests`。测试在临时本地仓库直接调用 pre-push 钩子检查待推送历史。
   - 本机登记需要保护的地址或链接：`dotnet run --project src/VPSPanel.Guard -- register`，按提示隐藏输入。登记文件使用当前 Windows 用户的 DPAPI 保护。

@@ -94,7 +94,9 @@ c=json.load(open("live config.json"))
 i=c["inbounds"][0]
 i["tag"]="fixture-user";i["port"]=28445
 c["inbounds"].append(dict(tag="fixture-system",listen="127.0.0.1",port=28446,protocol="dokodemo-door",settings=dict(address="127.0.0.1",port=24443,network="tcp")))
-c["routing"]["rules"].insert(0,dict(type="field",inboundTag=["fixture-system","fixture-resolver"],outboundTag="lab-direct"))
+c["inbounds"].append(dict(c["inbounds"][-1], tag="retired-fixture", port=28447))
+c["routing"]["balancers"]=[dict(tag="fixture-balance",selector=["lab-direct"])]
+c["routing"]["rules"].insert(0,dict(type="field",inboundTag=["fixture-system","fixture-resolver","retired-fixture"],balancerTag="fixture-balance"))
 json.dump(c,open("migration-source.json","w"))
 PY
     ./xray run -c migration-source.json >migration-src.log 2>&1 & migration_src=$!

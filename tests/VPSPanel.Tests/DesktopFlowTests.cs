@@ -112,12 +112,14 @@ public sealed class DesktopFlowTests
                     demo.RulesPage.Target.Text="unlisted.example";
                     Assert.Contains("健康候选：A、B",demo.RulesPage.Preview.Text);
                     var dnsDirectory = Directory.CreateDirectory(Path.Combine(directory.FullName,"dns-fixture"));
-                    var dnsHost = demoSession.Current! with { Target=new SshTarget("phase2-lab",Service:"phase2-lab"), Direct=null, ManagedRevision="fixture" };
+                    var dnsHost = demoSession.Current! with { Target=new SshTarget("panel.example"), Direct=null, ManagedRevision="fixture",
+                        DeployedDohResolvers=["https://192.0.2.53/dns-query","https://198.51.100.53/dns-query"],
+                        DeployedBootstrap=["https+local://203.0.113.53/dns-query","https+local://192.0.2.54/dns-query"] };
                     var fixtureBook = new ConnectionBook(1,"fixture",new() { ["fixture"]=dnsHost });
                     File.WriteAllBytes(Path.Combine(dnsDirectory.FullName,"connections.dpapi"),System.Security.Cryptography.ProtectedData.Protect(
                         System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fixtureBook),null,System.Security.Cryptography.DataProtectionScope.CurrentUser));
-                    var dnsSession = new PanelSession(dnsDirectory.FullName,t=>new OpenSsh(t,config));
-                    var dns = new MainWindow(dnsSession){Left=-20000,Top=-20000,WindowStartupLocation=WindowStartupLocation.Manual,ShowActivated=false};
+                    var dnsSession = new PanelSession(dnsDirectory.FullName,_=>throw new InvalidOperationException("Offline settings fixture"));
+                    var dns = new MainWindow(dnsSession){Height=930,Left=-20000,Top=-20000,WindowStartupLocation=WindowStartupLocation.Manual,ShowActivated=false};
                     dns.Show();
                     dns.Nav.SelectedIndex=4;
                     foreach(var dark in new[]{false,true}){
@@ -134,6 +136,11 @@ public sealed class DesktopFlowTests
                         Assert.True(dns.DohAddresses.ActualWidth>120 && dns.BootstrapAddresses.ActualWidth>120);
                         Click(Descendants<Button>(dns.DohEditor).Single(b=>Equals(b.Content,"海外中转")));
                         Assert.Equal(string.Join(Environment.NewLine,DohResolvers.Overseas),dns.BootstrapAddresses.Text);
+                        dns.DohAddresses.Text=string.Join(Environment.NewLine,dnsHost.DeployedDohResolvers!);
+                        dns.BootstrapAddresses.Text=string.Join(Environment.NewLine,dnsHost.DeployedBootstrap!);
+                        Click(dns.SaveDohDraft);
+                        dns.SettingsPage.ScrollToHome();
+                        dns.UpdateLayout();
                         Capture(dns, "dns", dark);
                         for(int pageIndex=0;pageIndex<=2;pageIndex+=2){
                             demo.Nav.SelectedIndex=pageIndex;

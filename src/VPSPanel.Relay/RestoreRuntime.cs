@@ -46,7 +46,7 @@ internal static class RestoreRuntime
         var raw=RecoveryLayout.Parse(File.ReadAllText(Path.Combine(dir,"portable.json")));
         var used=raw["inbounds"]!.AsArray().Select(i=>int.TryParse(i?["port"]?.ToString(),out int p)?p:0).ToHashSet();
         var options=new RelayOptions("/var/lib/vpspanel/xray",Port(used),Port(used),profile.CheckUrl);
-        var root=RecoveryLayout.RouteUsers(raw,options.ApiPort,options.ListenPort);
+        var root=RecoveryLayout.RouteUsers(raw,options.ApiPort,options.ListenPort,profile.SourceRelayPort);
         var state=new RuntimeState(plan,plan.Exits.Where(e=>e.Enabled).Select(e=>new Lane(e.Id,"vp3-"+Guid.NewGuid().ToString("N"),Port(used))).ToArray())
         { PreviousDns = plan.ManagedDohResolvers != null ? EncryptedDnsRoute.OriginalDns(raw["dns"]) : null,
           PreviousGeodata = plan.ManagedDohResolvers != null ? raw["geodata"]?.DeepClone().AsObject() : null };

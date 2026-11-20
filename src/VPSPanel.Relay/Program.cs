@@ -9,7 +9,7 @@ using VPSPanel.Relay;
 try
 {
     if (args is ["version"]) { Console.WriteLine("VPSPanel.Relay "+RecoveryPackage.RelayVersion); return 0; }
-    if (args is ["capabilities"]) { Console.WriteLine("configurable-default"); Console.WriteLine("exit-failover"); Console.WriteLine("encrypted-dns-routing"); Console.WriteLine("split-doh"); Console.WriteLine("managed-doh"); return 0; }
+    if (args is ["capabilities"]) { Console.WriteLine("configurable-default"); Console.WriteLine("exit-failover"); Console.WriteLine("encrypted-dns-routing"); Console.WriteLine("split-doh"); Console.WriteLine("managed-layout"); Console.WriteLine("managed-doh"); return 0; }
     if (args is ["prepare-probe", var directory])
     {
         var state = Disk.Read<RuntimeState>(Path.Combine(directory, "committed.json"));
